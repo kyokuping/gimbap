@@ -8,3 +8,5 @@ name = "gimbap"
 path = "src/lib.rs"
 
 [dependencies]
+regex = "1.11.3"
+url = "2.5.7"
