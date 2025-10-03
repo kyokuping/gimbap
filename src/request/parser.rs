@@ -1,8 +1,20 @@
+use std::collections::HashMap;
 use std::io::{BufRead as _, BufReader, Read};
 use std::sync::LazyLock;
 
 static URL_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^([A-Z]+?) ([^ ]+?) (HTTP/[0-9.]+?)\s*$").unwrap());
+static HEADER_NAME_REGEX: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z0-9!#\$%&'*+-.^_`|~]+$").unwrap());
+static HEADER_VALUE_REGEX: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new("^[\\t\\u0020-\\u007E\\u0080-\\u00FF]*$").unwrap());
+static CONTENT_TYPE_REGEX: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^[\\w+-.]+/[-.\\w+]+.*$").unwrap());
+static AUTHORIZATION_REGEX: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^\\w+ .+$").unwrap());
+static ACCEPT_PART_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"^(\\*|\\w+)/(\\*|[-.\\w+]+)(;\\s*q=\\d(\\.\\d+)?)?$").unwrap()
+});
 
 pub struct Request {
     pub method: HttpMethod,
@@ -74,4 +86,71 @@ impl HttpVersion {
             _ => panic!("Unsupported HTTP version"),
         }
     }
+}
+
+pub fn parse_headers<T: Read>(stream: T) -> Result<HashMap<String, Vec<String>>, String> {
+    let mut headers = HashMap::new();
+
+    let reader = BufReader::new(stream);
+
+    for line_result in reader.lines() {
+        let line = line_result.map_err(|e| e.to_string())?;
+        if line.is_empty() {
+            break;
+        }
+
+        if let Some((key_str, values_str)) = line.split_once(":") {
+            let key = key_str.trim().to_lowercase();
+            if !HEADER_NAME_REGEX.is_match(&key) {
+                continue;
+            }
+
+            let values: Vec<String> = values_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+            if values
+                .iter()
+                .any(|value| !HEADER_VALUE_REGEX.is_match(value))
+            {
+                continue;
+            }
+
+            if values
+                .iter()
+                .any(|value| !validate_special_header(&key, value))
+            {
+                continue;
+            }
+
+            headers
+                .entry(key)
+                .or_insert_with(Vec::new)
+                .extend_from_slice(&values);
+        }
+    }
+    Ok(headers)
+}
+
+fn validate_special_header(key: &str, value: &str) -> bool {
+    match key {
+        "content-type" => CONTENT_TYPE_REGEX.is_match(value),
+        "authorization" => AUTHORIZATION_REGEX.is_match(value),
+        "accept" => {
+            if value.is_empty() {
+                false
+            } else {
+                value
+                    .split(",")
+                    .all(|part| ACCEPT_PART_REGEX.is_match(part.trim()))
+            }
+        }
+        _ => true,
+    }
+}
+
+pub struct RequestMetadata {
+    pub content_length: u64,
+    pub content_type: String,
+    pub host: String,
 }
