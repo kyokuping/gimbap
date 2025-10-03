@@ -1,6 +1,11 @@
+use derive_builder::Builder;
+use mime::Mime;
+use once_cell::unsync::Lazy;
 use std::collections::HashMap;
-use std::io::{BufRead as _, BufReader, Read};
+use std::io::BufRead;
+use std::str::FromStr;
 use std::sync::LazyLock;
+use url::Host;
 
 static URL_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^([A-Z]+?) ([^ ]+?) (HTTP/[0-9.]+?)\s*$").unwrap());
@@ -8,8 +13,6 @@ static HEADER_NAME_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z0-9!#\$%&'*+-.^_`|~]+$").unwrap());
 static HEADER_VALUE_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new("^[\\t\\u0020-\\u007E\\u0080-\\u00FF]*$").unwrap());
-static CONTENT_TYPE_REGEX: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"^[\\w+-.]+/[-.\\w+]+.*$").unwrap());
 static AUTHORIZATION_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^\\w+ .+$").unwrap());
 static ACCEPT_PART_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
@@ -20,20 +23,34 @@ pub struct Request {
     pub method: HttpMethod,
     pub path: String,
     pub version: HttpVersion,
+    pub headers: HashMap<String, Vec<String>>,
+    pub header_metadata: HeaderMetadata,
+}
+#[derive(Builder)]
+pub struct HeaderMetadata {
+    pub host: Host,
+    pub body_metadata: Option<BodyMetadata>,
+}
+#[derive(Clone, Builder)]
+pub struct BodyMetadata {
+    pub content_type: Mime,
+    pub content_length: u64,
 }
 
-pub fn parse_connection<T: Read>(stream: T) -> Result<Request, Box<dyn std::error::Error>> {
+pub fn parse_connection<T: BufRead>(reader: &mut T) -> Result<Request, Box<dyn std::error::Error>> {
     let mut line = String::new();
-    let mut buf_reader = BufReader::new(stream);
-    let len = buf_reader.read_line(&mut line)?;
+    let len = reader.read_line(&mut line)?;
     if len == 0 {
         return Err("Unexpected end of stream".into());
     }
     let (method, path, version) = parse_start_line(&line)?;
+    let (headers, header_metadata) = parse_headers(reader)?;
     Ok(Request {
         method,
         path,
         version,
+        headers,
+        header_metadata,
     })
 }
 
@@ -88,13 +105,15 @@ impl HttpVersion {
     }
 }
 
-pub fn parse_headers<T: Read>(stream: T) -> Result<HashMap<String, Vec<String>>, String> {
+pub fn parse_headers<T: BufRead>(
+    reader: &mut T,
+) -> Result<(HashMap<String, Vec<String>>, HeaderMetadata), Box<dyn std::error::Error>> {
     let mut headers = HashMap::new();
-
-    let reader = BufReader::new(stream);
+    let mut header_metadata_builder = HeaderMetadataBuilder::create_empty();
+    let mut body_metadata_builder = Lazy::new(BodyMetadataBuilder::create_empty);
 
     for line_result in reader.lines() {
-        let line = line_result.map_err(|e| e.to_string())?;
+        let line = line_result?;
         if line.is_empty() {
             break;
         }
@@ -123,18 +142,42 @@ pub fn parse_headers<T: Read>(stream: T) -> Result<HashMap<String, Vec<String>>,
                 continue;
             }
 
+            match key.as_str() {
+                "host" => {
+                    if let Some(host) = values.first() {
+                        header_metadata_builder.host(Host::parse(host)?);
+                    }
+                }
+                "content-length" => {
+                    if let Some(length) = values.first() {
+                        body_metadata_builder.content_length(length.parse::<u64>()?);
+                    }
+                }
+                "content-type" => {
+                    if let Some(content_type) = values.first() {
+                        body_metadata_builder.content_type(Mime::from_str(content_type)?);
+                    }
+                }
+                _ => {}
+            }
+
             headers
                 .entry(key)
                 .or_insert_with(Vec::new)
                 .extend_from_slice(&values);
         }
     }
-    Ok(headers)
+
+    let body_metadata = match Lazy::get(&body_metadata_builder) {
+        Some(builder) => Some(builder.build()?),
+        None => None,
+    };
+    header_metadata_builder.body_metadata(body_metadata);
+    Ok((headers, header_metadata_builder.build()?))
 }
 
 fn validate_special_header(key: &str, value: &str) -> bool {
     match key {
-        "content-type" => CONTENT_TYPE_REGEX.is_match(value),
         "authorization" => AUTHORIZATION_REGEX.is_match(value),
         "accept" => {
             if value.is_empty() {
@@ -147,10 +190,4 @@ fn validate_special_header(key: &str, value: &str) -> bool {
         }
         _ => true,
     }
-}
-
-pub struct RequestMetadata {
-    pub content_length: u64,
-    pub content_type: String,
-    pub host: String,
 }
