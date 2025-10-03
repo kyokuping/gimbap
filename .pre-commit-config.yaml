@@ -1,0 +1,40 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.3.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-toml
+  - repo: local
+    hooks:
+      - id: cargo-check
+        name: cargo check
+        description: Check Rust code for errors.
+        entry: cargo check
+        language: rust
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        description: Lint code with clippy.
+        entry: cargo clippy -- -D warnings
+        language: rust
+        type: [rust]
+        pass_filenames: false
+
+      - id: cargo-fmt
+        name: cargo fmt
+        description: Format files with rustfmt.
+        entry: cargo fmt -- --check
+        language: rust
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-tests
+        name: cargo test
+        description: Run tests with cargo.
+        entry: cargo test
+        language: rust
+        types: [rust]
+        pass_filenames: false
