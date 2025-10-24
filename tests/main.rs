@@ -1,10 +1,15 @@
-use gimbap::request::parser::{HttpMethod, HttpVersion, parse_connection, parse_headers};
+use flate2::Compression;
+use flate2::read::GzEncoder;
+use gimbap::request::parser::{
+    Body, ContentEncoding, ContentLength, HttpMethod, HttpVersion, parse_connection, parse_headers,
+};
+use std::io::{self, Read};
 use url::Host;
 
 #[test]
 fn test_request_parser() {
     let request = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
-    let result = parse_connection(&mut request.as_bytes());
+    let result = parse_connection(request.as_bytes());
     let request = result.unwrap();
     assert_eq!(request.method, HttpMethod::GET);
     assert_eq!(request.path, "/");
@@ -32,7 +37,85 @@ fn test_parse_headers() {
             .as_ref()
             .unwrap()
             .content_length,
-        12u64
+        ContentLength::Fixed(12)
     );
     assert_eq!(headers_metadata.host, Host::parse("example.com").unwrap());
+}
+
+#[test]
+fn test_into_reader_empty() {
+    let empty_reader = io::empty();
+    let empty_body = Body {
+        reader: Box::new(empty_reader),
+        size_hint: Some(0),
+        encoding: None,
+    };
+
+    let mut buf = Vec::new();
+    empty_body
+        .into_reader()
+        .unwrap()
+        .read_to_end(&mut buf)
+        .unwrap();
+    assert_eq!(buf, []);
+}
+
+#[test]
+fn test_into_reader_none_encoded() {
+    let hello = "Hello, World!";
+    let reader = hello.as_bytes();
+    let none_encoded_body = Body {
+        reader: Box::new(reader),
+        size_hint: Some(hello.len() as u64),
+        encoding: None,
+    };
+
+    let mut buf = Vec::new();
+    none_encoded_body
+        .into_reader()
+        .unwrap()
+        .read_to_end(&mut buf)
+        .unwrap();
+    assert_eq!(buf, reader);
+}
+
+#[test]
+fn test_into_reader_single_encoded() {
+    let hello = "Hello, World!";
+    let reader = hello.as_bytes();
+    let gzip_encoded_reader = GzEncoder::new(reader, Compression::default());
+    let single_encoded_body = Body {
+        reader: Box::new(gzip_encoded_reader),
+        size_hint: Some(hello.len() as u64),
+        encoding: Some(vec![ContentEncoding::Gzip]),
+    };
+
+    let mut buf = Vec::new();
+    single_encoded_body
+        .into_reader()
+        .unwrap()
+        .read_to_end(&mut buf)
+        .unwrap();
+    assert_eq!(buf, reader);
+}
+
+#[test]
+fn test_into_reader_multiple_encoded() {
+    let hello = "Hello, World!";
+    let reader = hello.as_bytes();
+    let gzip_encoded_reader = GzEncoder::new(reader, Compression::default());
+    let brotli_encoded_reader = brotli::CompressorReader::new(gzip_encoded_reader, 4098, 0, 22);
+    let multiple_encoded_body = Body {
+        reader: Box::new(brotli_encoded_reader),
+        size_hint: Some(hello.len() as u64),
+        encoding: Some(vec![ContentEncoding::Gzip, ContentEncoding::Br]),
+    };
+
+    let mut buf = Vec::new();
+    multiple_encoded_body
+        .into_reader()
+        .unwrap()
+        .read_to_end(&mut buf)
+        .unwrap();
+    assert_eq!(buf, reader);
 }

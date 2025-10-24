@@ -1,11 +1,14 @@
 use derive_builder::Builder;
+use flate2::read::{DeflateDecoder, GzDecoder};
 use mime::Mime;
 use once_cell::unsync::Lazy;
 use std::collections::HashMap;
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::str::FromStr;
 use std::sync::LazyLock;
 use url::Host;
+
+const MAX_BODY_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 
 static URL_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^([A-Z]+?) ([^ ]+?) (HTTP/[0-9.]+?)\s*$").unwrap());
@@ -18,49 +21,6 @@ static AUTHORIZATION_REGEX: LazyLock<regex::Regex> =
 static ACCEPT_PART_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"^(\\*|\\w+)/(\\*|[-.\\w+]+)(;\\s*q=\\d(\\.\\d+)?)?$").unwrap()
 });
-
-pub struct Request {
-    pub method: HttpMethod,
-    pub path: String,
-    pub version: HttpVersion,
-    pub headers: HashMap<String, Vec<String>>,
-    pub header_metadata: HeaderMetadata,
-}
-#[derive(Builder)]
-pub struct HeaderMetadata {
-    pub host: Host,
-    pub body_metadata: Option<BodyMetadata>,
-}
-#[derive(Clone, Builder)]
-pub struct BodyMetadata {
-    pub content_type: Mime,
-    pub content_length: u64,
-}
-
-pub fn parse_connection<T: BufRead>(reader: &mut T) -> Result<Request, Box<dyn std::error::Error>> {
-    let mut line = String::new();
-    let len = reader.read_line(&mut line)?;
-    if len == 0 {
-        return Err("Unexpected end of stream".into());
-    }
-    let (method, path, version) = parse_start_line(&line)?;
-    let (headers, header_metadata) = parse_headers(reader)?;
-    Ok(Request {
-        method,
-        path,
-        version,
-        headers,
-        header_metadata,
-    })
-}
-
-fn parse_start_line(line: &str) -> Result<(HttpMethod, String, HttpVersion), String> {
-    let captures = URL_REGEX.captures(line).ok_or("Invalid request line")?;
-    let method = HttpMethod::from_str(&captures[1]);
-    let url = captures[2].to_string();
-    let version = HttpVersion::from_str(&captures[3]);
-    Ok((method, url, version))
-}
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum HttpMethod {
@@ -105,9 +65,102 @@ impl HttpVersion {
     }
 }
 
+pub struct Request {
+    pub method: HttpMethod,
+    pub path: String,
+    pub version: HttpVersion,
+    pub headers: HashMap<String, Vec<String>>,
+    pub header_metadata: HeaderMetadata,
+    pub body: Option<Body>,
+}
+
+#[derive(Builder)]
+pub struct HeaderMetadata {
+    pub host: Host,
+    pub body_metadata: Option<BodyMetadata>,
+}
+
+#[derive(Clone, Builder)]
+pub struct BodyMetadata {
+    pub content_type: Mime,
+    pub content_length: ContentLength,
+    #[builder(default)]
+    pub content_encoding: Option<Vec<ContentEncoding>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContentLength {
+    Fixed(u64),
+    Chunked,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Hash)]
+pub enum ContentEncoding {
+    Gzip,
+    Compress,
+    Deflate,
+    Br,
+    Zstd,
+    /// Dictionary-Compressed Brotli
+    Dcb,
+    /// Dictionary-Compressed Zstd
+    Dcz,
+}
+
+impl FromStr for ContentEncoding {
+    type Err = String;
+
+    fn from_str(encoding: &str) -> Result<Self, Self::Err> {
+        match encoding {
+            "gzip" => Ok(ContentEncoding::Gzip),
+            "compress" => Ok(ContentEncoding::Compress),
+            "deflate" => Ok(ContentEncoding::Deflate),
+            "br" => Ok(ContentEncoding::Br),
+            "zstd" => Ok(ContentEncoding::Zstd),
+            "dcb" => Ok(ContentEncoding::Dcb),
+            "dcz" => Ok(ContentEncoding::Dcz),
+            _ => Err(format!("Unknown content encoding: {}", encoding)),
+        }
+    }
+}
+
+pub fn parse_connection<T: BufRead + 'static>(
+    mut reader: T,
+) -> Result<Request, Box<dyn std::error::Error>> {
+    let mut line = String::new();
+    let len = reader.read_line(&mut line)?;
+    if len == 0 {
+        return Err("Unexpected end of stream".into());
+    }
+    let (method, path, version) = parse_start_line(&line)?;
+    let (headers, header_metadata) = parse_headers(&mut reader)?;
+    let body = match &header_metadata.body_metadata {
+        Some(metadata) => Some(Body::try_new(reader, metadata.clone())?),
+        None => None,
+    };
+    Ok(Request {
+        method,
+        path,
+        version,
+        headers,
+        header_metadata,
+        body,
+    })
+}
+
+fn parse_start_line(line: &str) -> Result<(HttpMethod, String, HttpVersion), String> {
+    let captures = URL_REGEX.captures(line).ok_or("Invalid request line")?;
+    let method = HttpMethod::from_str(&captures[1]);
+    let url = captures[2].to_string();
+    let version = HttpVersion::from_str(&captures[3]);
+    Ok((method, url, version))
+}
+
+type ParsedHeader = (HashMap<String, Vec<String>>, HeaderMetadata);
+
 pub fn parse_headers<T: BufRead>(
     reader: &mut T,
-) -> Result<(HashMap<String, Vec<String>>, HeaderMetadata), Box<dyn std::error::Error>> {
+) -> Result<ParsedHeader, Box<dyn std::error::Error>> {
     let mut headers = HashMap::new();
     let mut header_metadata_builder = HeaderMetadataBuilder::create_empty();
     let mut body_metadata_builder = Lazy::new(BodyMetadataBuilder::create_empty);
@@ -148,14 +201,33 @@ pub fn parse_headers<T: BufRead>(
                         header_metadata_builder.host(Host::parse(host)?);
                     }
                 }
-                "content-length" => {
-                    if let Some(length) = values.first() {
-                        body_metadata_builder.content_length(length.parse::<u64>()?);
-                    }
-                }
                 "content-type" => {
                     if let Some(content_type) = values.first() {
                         body_metadata_builder.content_type(Mime::from_str(content_type)?);
+                    }
+                }
+                "content-length" => {
+                    if let Some(length) = values.first() {
+                        body_metadata_builder.content_length(ContentLength::Fixed(length.parse()?));
+                    }
+                }
+                "transfer-encoding" => {
+                    if let Some(encoding) = values.first() {
+                        if encoding == "chunked" {
+                            body_metadata_builder.content_length(ContentLength::Chunked);
+                        } else {
+                            todo!("either return correct error or handle other encodings")
+                        }
+                    }
+                }
+                "content-encoding" => {
+                    if !values.is_empty() {
+                        body_metadata_builder.content_encoding(Some(
+                            values
+                                .iter()
+                                .map(|v| ContentEncoding::from_str(v))
+                                .collect::<Result<_, _>>()?,
+                        ));
                     }
                 }
                 _ => {}
@@ -189,5 +261,64 @@ fn validate_special_header(key: &str, value: &str) -> bool {
             }
         }
         _ => true,
+    }
+}
+
+pub struct Body {
+    pub reader: Box<dyn Read>,
+    pub size_hint: Option<u64>,
+    pub encoding: Option<Vec<ContentEncoding>>,
+}
+
+impl Body {
+    pub fn try_new<T: Read + 'static>(
+        reader: T,
+        metadata: BodyMetadata,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(match metadata.content_length {
+            ContentLength::Fixed(length) if length > 0 => Body {
+                reader: Box::new(reader),
+                encoding: metadata.content_encoding,
+                size_hint: Some(length),
+            },
+            ContentLength::Fixed(_) => return Err("Invalid content length".into()),
+            ContentLength::Chunked => Body {
+                reader: Box::new(reader),
+                encoding: metadata.content_encoding,
+                size_hint: None,
+            },
+        })
+    }
+
+    pub fn into_reader(self) -> Result<Box<dyn Read + 'static>, Box<dyn std::error::Error>> {
+        let decoder = match self.encoding {
+            Some(encodings) => {
+                let mut decoder = self.reader;
+                for encoding in encodings.into_iter().rev() {
+                    decoder = Body::wrap_encoding_decoder(decoder, encoding)?;
+                }
+                decoder
+            }
+            None => self.reader,
+        };
+
+        Ok(Box::new(
+            decoder.take(self.size_hint.unwrap_or(MAX_BODY_SIZE)),
+        ))
+    }
+
+    fn wrap_encoding_decoder(
+        reader: Box<dyn Read + 'static>,
+        encoding: ContentEncoding,
+    ) -> Result<Box<dyn Read + 'static>, Box<dyn std::error::Error>> {
+        Ok(match encoding {
+            ContentEncoding::Gzip => Box::new(GzDecoder::new(reader)),
+            ContentEncoding::Deflate => Box::new(DeflateDecoder::new(reader)),
+            ContentEncoding::Br => Box::new(brotli::Decompressor::new(reader, 4096)),
+            ContentEncoding::Zstd => Box::new(zstd::stream::Decoder::new(reader)?),
+            ContentEncoding::Compress | ContentEncoding::Dcb | ContentEncoding::Dcz => {
+                return Err(format!("{:?} encoding not supported yet", encoding).into());
+            }
+        })
     }
 }
