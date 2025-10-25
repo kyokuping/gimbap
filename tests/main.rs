@@ -41,6 +41,33 @@ fn test_parse_headers() {
     );
     assert_eq!(headers_metadata.host, Host::parse("example.com").unwrap());
 }
+#[test]
+fn test_transfer_encoding_chunked() {
+    let headers =
+        "Host: example.com\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n";
+    let result = parse_headers(&mut headers.as_bytes());
+    let (headers, headers_metadata) = result.unwrap();
+    assert_eq!(headers.get("transfer-encoding").unwrap(), &["chunked"]);
+    assert_eq!(
+        headers_metadata
+            .body_metadata
+            .as_ref()
+            .unwrap()
+            .content_length,
+        ContentLength::Chunked
+    );
+}
+
+#[test]
+fn test_transfer_encoding_identity() {
+    let headers =
+        "Host: example.com\r\nContent-Type: text/plain\r\nTransfer-Encoding: identity\r\n\r\n";
+    let result = parse_headers(&mut headers.as_bytes());
+    assert!(result.is_err());
+    let error = result.unwrap_err();
+    let expected_error_message = "transfer-encoding `identity` is not supported yet";
+    assert_eq!(error.to_string(), expected_error_message);
+}
 
 #[test]
 fn test_into_reader_empty() {

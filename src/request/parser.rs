@@ -74,13 +74,13 @@ pub struct Request {
     pub body: Option<Body>,
 }
 
-#[derive(Builder)]
+#[derive(Builder, Debug)]
 pub struct HeaderMetadata {
     pub host: Host,
     pub body_metadata: Option<BodyMetadata>,
 }
 
-#[derive(Clone, Builder)]
+#[derive(Clone, Builder, Debug)]
 pub struct BodyMetadata {
     pub content_type: Mime,
     pub content_length: ContentLength,
@@ -216,7 +216,7 @@ pub fn parse_headers<T: BufRead>(
                         if encoding == "chunked" {
                             body_metadata_builder.content_length(ContentLength::Chunked);
                         } else {
-                            todo!("either return correct error or handle other encodings")
+                            return Err(format!("transfer-encoding `{encoding}` is not supported yet").into());
                         }
                     }
                 }
