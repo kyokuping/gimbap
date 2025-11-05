@@ -1,4 +1,5 @@
 use derive_builder::Builder;
+use encoding_rs::UTF_8;
 use flate2::read::{DeflateDecoder, GzDecoder};
 use mime::Mime;
 use once_cell::unsync::Lazy;
@@ -86,6 +87,8 @@ pub struct BodyMetadata {
     pub content_length: ContentLength,
     #[builder(default)]
     pub content_encoding: Option<Vec<ContentEncoding>>,
+    #[builder(default)]
+    pub boundary: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -216,7 +219,10 @@ pub fn parse_headers<T: BufRead>(
                         if encoding == "chunked" {
                             body_metadata_builder.content_length(ContentLength::Chunked);
                         } else {
-                            return Err(format!("transfer-encoding `{encoding}` is not supported yet").into());
+                            return Err(format!(
+                                "transfer-encoding `{encoding}` is not supported yet"
+                            )
+                            .into());
                         }
                     }
                 }
@@ -228,6 +234,11 @@ pub fn parse_headers<T: BufRead>(
                                 .map(|v| ContentEncoding::from_str(v))
                                 .collect::<Result<_, _>>()?,
                         ));
+                    }
+                }
+                "boundary" => {
+                    if !values.is_empty() {
+                        body_metadata_builder.boundary(Some(values[0].to_string()));
                     }
                 }
                 _ => {}
@@ -268,6 +279,8 @@ pub struct Body {
     pub reader: Box<dyn Read>,
     pub size_hint: Option<u64>,
     pub encoding: Option<Vec<ContentEncoding>>,
+    pub content_type: Mime,
+    pub boundary: Option<String>,
 }
 
 impl Body {
@@ -280,12 +293,16 @@ impl Body {
                 reader: Box::new(reader),
                 encoding: metadata.content_encoding,
                 size_hint: Some(length),
+                content_type: metadata.content_type,
+                boundary: metadata.boundary,
             },
             ContentLength::Fixed(_) => return Err("Invalid content length".into()),
             ContentLength::Chunked => Body {
                 reader: Box::new(reader),
                 encoding: metadata.content_encoding,
                 size_hint: None,
+                content_type: metadata.content_type,
+                boundary: metadata.boundary,
             },
         })
     }
@@ -321,4 +338,223 @@ impl Body {
             }
         })
     }
+
+    pub fn into_body_data(self) -> Result<BodyData, Box<dyn std::error::Error>> {
+        let content_type = self.content_type.clone();
+        let boundary = self.boundary.clone();
+        let size_hint = self.size_hint;
+        let mut reader = self.into_reader()?;
+        Ok(match content_type.essence_str() {
+            "application/x-www-form-urlencoded" => {
+                let mut form_data: HashMap<String, FormDataValue> = HashMap::new();
+
+                let mut main_buf = String::new();
+                let mut temp_buf = [0u8; 8192]; // 8KB
+                let mut decoded_buf = String::with_capacity(8192);
+                let mut decoder = UTF_8.new_decoder();
+
+                loop {
+                    let bytes_read = reader.read(&mut temp_buf)?;
+
+                    let (decode_result, bytes_parsed, _) = decoder.decode_to_string(
+                        &temp_buf[..bytes_read],
+                        &mut decoded_buf,
+                        bytes_read == 0,
+                    );
+
+                    if decode_result == encoding_rs::CoderResult::OutputFull {
+                        unreachable!("Output buffer is full when the buffer is String");
+                    }
+
+                    let mut start_pos = 0;
+                    main_buf.push_str(&decoded_buf[..bytes_parsed]);
+
+                    let mut extract_pair = |start_pos, end_pos| -> Result<usize, String> {
+                        let pair = &main_buf[start_pos..end_pos];
+                        let (key, value) = pair.split_once("=").ok_or("Invalid form data")?;
+                        form_data.insert(key.to_string(), FormDataValue::Text(value.to_string()));
+                        Ok(end_pos + 1)
+                    };
+
+                    if bytes_read > 0 {
+                        while let Some(ampersand_pos) = main_buf[start_pos..].find("&") {
+                            start_pos = extract_pair(start_pos, ampersand_pos)?;
+                        }
+                        if start_pos < main_buf.len() {
+                            main_buf.drain(..start_pos);
+                        }
+                    } else {
+                        extract_pair(start_pos, main_buf.len())?;
+                        break;
+                    }
+                }
+
+                BodyData::FormData(form_data)
+            }
+            "multipart/form-data" => {
+                let mut data: HashMap<String, FormDataValue> = HashMap::new();
+
+                let boundary = boundary.ok_or("Missing boundary for multipart")?;
+                let part_boundary = format!("--{boundary}\r\n");
+                let end_boundary = format!("--{boundary}--\r\n");
+
+                let mut main_buf = Vec::new();
+                let mut temp_buf = [0u8; 8192]; // 8KB
+
+                loop {
+                    // EOF and empty buffer
+                    let bytes_read = reader.read(&mut temp_buf)?;
+                    if bytes_read == 0 && main_buf.is_empty() {
+                        break;
+                    }
+
+                    main_buf.extend_from_slice(&temp_buf[..bytes_read]);
+
+                    loop {
+                        // buffer position
+                        let part_pos = find_subslice(&main_buf, part_boundary.as_bytes());
+                        let end_pos = find_subslice(&main_buf, end_boundary.as_bytes());
+
+                        let (index, is_end_boundary, boundary_len) = match (part_pos, end_pos) {
+                            (Some(part_pos), Some(end_pos)) => {
+                                if part_pos < end_pos {
+                                    (part_pos, false, part_boundary.len())
+                                } else {
+                                    (end_pos, true, end_boundary.len())
+                                }
+                            }
+                            (Some(part_pos), None) => (part_pos, false, part_boundary.len()),
+                            (None, Some(end_pos)) => (end_pos, true, end_boundary.len()),
+                            _ => break,
+                        };
+
+                        let part_data = &main_buf[..index];
+
+                        if !part_data.is_empty() {
+                            let (name, value) = parse_part(&part_data[..(part_data.len() - 2)])?;
+                            data.insert(name, value);
+                        }
+
+                        main_buf.drain(..index + boundary_len);
+
+                        if is_end_boundary {
+                            return Ok(BodyData::FormData(data));
+                        }
+                    }
+
+                    if bytes_read == 0 {
+                        // couldn't reach end boundary
+                        return Err("multipart: missing end boundary".into());
+                    }
+                }
+
+                BodyData::FormData(data)
+            }
+            "text/plain" => {
+                let mut text = match size_hint {
+                    Some(size) => String::with_capacity(size as usize),
+                    None => String::new(),
+                };
+                reader.read_to_string(&mut text)?;
+                BodyData::Text(text)
+            }
+            _ => {
+                let mut data = match size_hint {
+                    Some(size) => Vec::with_capacity(size as usize),
+                    None => Vec::new(),
+                };
+                reader.read_to_end(&mut data)?;
+                BodyData::Other { content_type, data }
+            }
+        })
+    }
+}
+
+pub enum BodyData {
+    Json(serde_json::Value),
+    FormData(HashMap<String, FormDataValue>),
+    Text(String),
+    Other { content_type: Mime, data: Vec<u8> },
+}
+
+pub enum FormDataValue {
+    Text(String),
+    File {
+        filename: String,
+        content_type: String,
+        data: Vec<u8>, // use PathBuf for OOM
+    },
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn parse_part(part_data: &[u8]) -> Result<(String, FormDataValue), Box<dyn std::error::Error>> {
+    let separator = b"\r\n\r\n";
+    let sep_pos = find_subslice(part_data, separator).ok_or("missing header/body seperator")?;
+
+    let headers_raw = &part_data[..sep_pos];
+    let body_raw = &part_data[sep_pos + separator.len()..];
+
+    let (name, filename, content_type) = parse_part_headers(headers_raw)?;
+
+    if let Some(filename) = filename {
+        Ok((
+            name,
+            FormDataValue::File {
+                filename,
+                content_type: content_type
+                    .unwrap_or_else(|| "application/octet-stream".to_string()),
+                data: body_raw.to_vec(), //change this avoid OOM
+            },
+        ))
+    } else {
+        Ok((
+            name,
+            FormDataValue::Text(String::from_utf8(body_raw.to_vec())?), //change this avoid OOM
+        ))
+    }
+}
+
+fn parse_part_headers(
+    headers_raw: &[u8],
+) -> Result<(String, Option<String>, Option<String>), Box<dyn std::error::Error>> {
+    let header_str = std::str::from_utf8(headers_raw);
+    let mut name = None;
+    let mut filename = None;
+    let mut content_type = None;
+
+    for line in header_str?.lines() {
+        if let Some((header_name, header_value)) = line.split_once(':') {
+            let header_name_lowercase = header_name.trim().to_lowercase();
+            let header_value = header_value.trim();
+
+            if header_name_lowercase == "content-disposition" {
+                for param in header_value.split(';') {
+                    if let Some((key, value)) = param.trim().split_once('=') {
+                        let decoded_val = decode_disposition_param(value.trim_matches('"'));
+
+                        match key.trim() {
+                            "name" => name = Some(decoded_val),
+                            "filename" => filename = Some(decoded_val),
+                            _ => {}
+                        }
+                    }
+                }
+            } else if header_name_lowercase == "content-type" {
+                content_type = Some(header_value.to_string());
+            }
+        }
+    }
+    let name = name.ok_or("missing 'name' in Content-Disposition")?;
+    Ok((name, filename, content_type))
+}
+
+fn decode_disposition_param(s: &str) -> String {
+    s.replace("%0A", "\n")
+        .replace("%0D", "\r")
+        .replace("%22", "\"")
 }

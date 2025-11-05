@@ -1,8 +1,10 @@
 use flate2::Compression;
 use flate2::read::GzEncoder;
 use gimbap::request::parser::{
-    Body, ContentEncoding, ContentLength, HttpMethod, HttpVersion, parse_connection, parse_headers,
+    Body, BodyData, ContentEncoding, ContentLength, FormDataValue, HttpMethod, HttpVersion,
+    parse_connection, parse_headers,
 };
+use std::collections::HashMap;
 use std::io::{self, Read};
 use url::Host;
 
@@ -76,6 +78,8 @@ fn test_into_reader_empty() {
         reader: Box::new(empty_reader),
         size_hint: Some(0),
         encoding: None,
+        content_type: mime::TEXT_PLAIN,
+        boundary: None,
     };
 
     let mut buf = Vec::new();
@@ -84,7 +88,8 @@ fn test_into_reader_empty() {
         .unwrap()
         .read_to_end(&mut buf)
         .unwrap();
-    assert_eq!(buf, []);
+
+    assert_eq!(buf, [] as [u8; 0]);
 }
 
 #[test]
@@ -95,6 +100,8 @@ fn test_into_reader_none_encoded() {
         reader: Box::new(reader),
         size_hint: Some(hello.len() as u64),
         encoding: None,
+        content_type: mime::TEXT_PLAIN,
+        boundary: None,
     };
 
     let mut buf = Vec::new();
@@ -115,6 +122,8 @@ fn test_into_reader_single_encoded() {
         reader: Box::new(gzip_encoded_reader),
         size_hint: Some(hello.len() as u64),
         encoding: Some(vec![ContentEncoding::Gzip]),
+        content_type: mime::TEXT_PLAIN,
+        boundary: None,
     };
 
     let mut buf = Vec::new();
@@ -136,6 +145,8 @@ fn test_into_reader_multiple_encoded() {
         reader: Box::new(brotli_encoded_reader),
         size_hint: Some(hello.len() as u64),
         encoding: Some(vec![ContentEncoding::Gzip, ContentEncoding::Br]),
+        content_type: mime::TEXT_PLAIN,
+        boundary: None,
     };
 
     let mut buf = Vec::new();
@@ -145,4 +156,118 @@ fn test_into_reader_multiple_encoded() {
         .read_to_end(&mut buf)
         .unwrap();
     assert_eq!(buf, reader);
+}
+
+#[test]
+fn test_into_body_data_text_plain() {
+    let text = "Hello, World!";
+    let body = Body {
+        reader: Box::new(text.as_bytes()),
+        size_hint: Some(text.len() as u64),
+        encoding: None,
+        content_type: mime::TEXT_PLAIN,
+        boundary: None,
+    };
+
+    let body_data = body.into_body_data().unwrap();
+    match body_data {
+        BodyData::Text(data) => assert_eq!(data, text),
+        _ => panic!("Expected BodyData::Text"),
+    }
+}
+
+#[test]
+fn test_into_body_data_x_www_form_urlencoded() {
+    let form_data = "key1=value1&key2=value2";
+    let body = Body {
+        reader: Box::new(form_data.as_bytes()),
+        size_hint: Some(form_data.len() as u64),
+        encoding: None,
+        content_type: mime::APPLICATION_WWW_FORM_URLENCODED,
+        boundary: None,
+    };
+
+    let body_data = body.into_body_data().unwrap();
+    match body_data {
+        BodyData::FormData(data) => {
+            let mut expected = HashMap::new();
+            expected.insert(
+                "key1".to_string(),
+                FormDataValue::Text("value1".to_string()),
+            );
+            expected.insert(
+                "key2".to_string(),
+                FormDataValue::Text("value2".to_string()),
+            );
+            assert_eq!(
+                data.len(),
+                expected.len(),
+                "HashMaps have different lengths"
+            );
+            for (key, value) in &expected {
+                assert!(data.contains_key(key));
+                let val1 = match data.get(key) {
+                    Some(FormDataValue::Text(v)) => v,
+                    _ => panic!(""),
+                };
+                let val2 = match value {
+                    FormDataValue::Text(v) => v,
+                    _ => panic!(""),
+                };
+                assert_eq!(val1, val2);
+            }
+        }
+        _ => panic!("Expected BodyData::FormData"),
+    }
+}
+
+#[test]
+fn test_into_body_data_multipart_form_data() {
+    let boundary = "TestBoundary123";
+    let multipart_data = concat!(
+        "--TestBoundary123\r\n",
+        "Content-Disposition: form-data; name=\"key1\"\r\n",
+        "\r\n",
+        "value1\r\n",
+        "--TestBoundary123\r\n",
+        "Content-Disposition: form-data; name=\"key2\"; filename=\"file.txt\"\r\n",
+        "Content-Type: text/plain\r\n",
+        "\r\n",
+        "file content\r\n",
+        "--TestBoundary123--\r\n",
+    )
+    .as_bytes();
+
+    let multipart_data_len = multipart_data.len();
+    let body = Body {
+        reader: Box::new(std::io::Cursor::new(multipart_data)),
+        size_hint: Some(multipart_data_len as u64),
+        encoding: None,
+        content_type: mime::MULTIPART_FORM_DATA,
+        boundary: Some(boundary.to_string()),
+    };
+
+    let body_data = body.into_body_data().unwrap();
+    match body_data {
+        BodyData::FormData(data) => {
+            assert_eq!(data.len(), 2);
+            match data.get("key1") {
+                Some(FormDataValue::Text(text)) => assert_eq!(text, "value1"),
+                _ => panic!("Expected text value for key1"),
+            }
+            match data.get("key2") {
+                Some(FormDataValue::File {
+                    filename,
+                    content_type,
+                    data,
+                }) => {
+                    assert_eq!(filename, "file.txt");
+                    assert_eq!(content_type, "text/plain");
+                    assert_eq!(data, b"file content");
+                }
+                _ => panic!("Expected file value for key2"),
+            }
+        }
+        _ => panic!("Expected BodyData::FormData"),
+    }
 }
