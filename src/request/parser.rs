@@ -190,7 +190,7 @@ pub fn parse_headers<T: BufRead>(
 
             if values
                 .iter()
-                .any(|value| !validate_special_header(&key, value))
+                .any(|value| !is_special_header_valid(&key, value))
             {
                 continue;
             }
@@ -256,7 +256,7 @@ pub fn parse_headers<T: BufRead>(
     Ok((headers, header_metadata_builder.build()?))
 }
 
-fn validate_special_header(key: &str, value: &str) -> bool {
+fn is_special_header_valid(key: &str, value: &str) -> bool {
     match key {
         "authorization" => AUTHORIZATION_REGEX.is_match(value),
         "accept" => {
