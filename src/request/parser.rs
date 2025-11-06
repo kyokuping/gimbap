@@ -148,7 +148,7 @@ pub fn parse_connection<T: BufRead + 'static>(
     })
 }
 
-fn parse_start_line(line: &str) -> Result<(HttpMethod, String, HttpVersion), String> {
+pub fn parse_start_line(line: &str) -> Result<(HttpMethod, String, HttpVersion), String> {
     let captures = URL_REGEX.captures(line).ok_or("Invalid request line")?;
     let method = HttpMethod::from_str(&captures[1]);
     let url = captures[2].to_string();

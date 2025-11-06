@@ -2,62 +2,204 @@ use flate2::Compression;
 use flate2::read::GzEncoder;
 use gimbap::request::parser::{
     Body, BodyData, ContentEncoding, ContentLength, FormDataValue, HttpMethod, HttpVersion,
-    parse_connection, parse_headers,
+    parse_connection, parse_headers, parse_start_line,
 };
 use std::collections::HashMap;
 use std::io::{self, Read};
 use url::Host;
 
 #[test]
-fn test_request_parser() {
-    let request = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
-    let result = parse_connection(request.as_bytes());
-    let request = result.unwrap();
-    assert_eq!(request.method, HttpMethod::GET);
-    assert_eq!(request.path, "/");
-    assert_eq!(request.version, HttpVersion::V1_1);
+fn test_parse_start_line_comprehensive() {
+    type TestCase<'a> = (HttpMethod, &'a str, HttpVersion);
+    let test_cases: Vec<(&str, Result<TestCase<'_>, &str>)> = vec![
+        (
+            "GET / HTTP/1.1",
+            Ok((HttpMethod::GET, "/", HttpVersion::V1_1)),
+        ),
+        (
+            "POST /submit HTTP/1.1",
+            Ok((HttpMethod::POST, "/submit", HttpVersion::V1_1)),
+        ),
+        (
+            "PUT /items/123 HTTP/1.1",
+            Ok((HttpMethod::PUT, "/items/123", HttpVersion::V1_1)),
+        ),
+        (
+            "DELETE /items/123 HTTP/1.1",
+            Ok((HttpMethod::DELETE, "/items/123", HttpVersion::V1_1)),
+        ),
+        (
+            "PATCH /items/123 HTTP/1.1",
+            Ok((HttpMethod::PATCH, "/items/123", HttpVersion::V1_1)),
+        ),
+        (
+            "HEAD / HTTP/1.1",
+            Ok((HttpMethod::HEAD, "/", HttpVersion::V1_1)),
+        ),
+        (
+            "CUSTOM /api HTTP/1.1",
+            Ok((
+                HttpMethod::Other("CUSTOM".to_string()),
+                "/api",
+                HttpVersion::V1_1,
+            )),
+        ),
+        (
+            "GET /path/with/multiple/segments HTTP/1.1",
+            Ok((
+                HttpMethod::GET,
+                "/path/with/multiple/segments",
+                HttpVersion::V1_1,
+            )),
+        ),
+        (
+            "GET /search?q=test&lang=ko HTTP/1.1",
+            Ok((HttpMethod::GET, "/search?q=test&lang=ko", HttpVersion::V1_1)),
+        ),
+        (
+            "GET /path-with-hyphen_and_underscore HTTP/1.1",
+            Ok((
+                HttpMethod::GET,
+                "/path-with-hyphen_and_underscore",
+                HttpVersion::V1_1,
+            )),
+        ),
+        (
+            "GET /path.with.dots HTTP/1.1",
+            Ok((HttpMethod::GET, "/path.with.dots", HttpVersion::V1_1)),
+        ),
+        ("GET /", Err("Invalid request line")),
+        ("GET HTTP/1.1", Err("Invalid request line")),
+        ("GET / TTP/1.1", Err("Invalid request line")),
+        ("GET  /two-spaces HTTP/1.1", Err("Invalid request line")),
+        ("", Err("Invalid request line")),
+        ("\r\n", Err("Invalid request line")),
+    ];
+
+    for (input, expected) in test_cases {
+        let result = parse_start_line(input);
+        match (result, expected) {
+            (Ok((method, path, version)), Ok((exp_method, exp_path, exp_version))) => {
+                assert_eq!(
+                    method, exp_method,
+                    "Mismatch in method for input: {}",
+                    input
+                );
+                assert_eq!(path, exp_path, "Mismatch in path for input: {}", input);
+                assert_eq!(
+                    version, exp_version,
+                    "Mismatch in version for input: {}",
+                    input
+                );
+            }
+            (Err(e), Err(exp_e)) => {
+                assert_eq!(e, exp_e, "Mismatch in error for input: {}", input);
+            }
+            (res, exp) => {
+                panic!(
+                    "Result {:?} does not match expected {:?} for input: {}",
+                    res, exp, input
+                );
+            }
+        }
+    }
 }
 
 #[test]
-fn test_parse_headers() {
-    let headers = "Host: example.com\r\nUser-Agent: Mozilla/5.0\r\nContent-Type: text/plain\r\nContent-Length: 12\r\n\r\n";
-    let result = parse_headers(&mut headers.as_bytes());
-    let (headers, headers_metadata) = result.unwrap(); //Err: UninitializedField("content_type")
-    assert_eq!(headers.get("host").unwrap(), &["example.com"]);
-    assert_eq!(headers.get("user-agent").unwrap(), &["Mozilla/5.0"]);
-    assert_eq!(
-        headers_metadata
-            .body_metadata
-            .as_ref()
-            .unwrap()
-            .content_type,
-        mime::TEXT_PLAIN
-    );
-    assert_eq!(
-        headers_metadata
-            .body_metadata
-            .as_ref()
-            .unwrap()
-            .content_length,
-        ContentLength::Fixed(12)
-    );
-    assert_eq!(headers_metadata.host, Host::parse("example.com").unwrap());
+#[should_panic(expected = "Unsupported HTTP version")]
+fn test_parse_start_line_unsupported_version_panic() {
+    let http_1_0 = "GET / HTTP/2.0";
+    let _ = parse_start_line(http_1_0);
 }
+
 #[test]
-fn test_transfer_encoding_chunked() {
-    let headers =
-        "Host: example.com\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n";
-    let result = parse_headers(&mut headers.as_bytes());
-    let (headers, headers_metadata) = result.unwrap();
-    assert_eq!(headers.get("transfer-encoding").unwrap(), &["chunked"]);
-    assert_eq!(
-        headers_metadata
-            .body_metadata
-            .as_ref()
-            .unwrap()
-            .content_length,
-        ContentLength::Chunked
+fn test_parse_headers_comprehensive() {
+    let raw_headers = concat!(
+        "Host: example.com\r\n",
+        "User-Agent: gimbap-test/1.0\r\n",
+        "ACCEPT: text/html, application/xhtml+xml, application/xml;q=0.9, */*;q=0.8\r\n",
+        "content-type: application/json\r\n",
+        "Content-Length: 42\r\n",
+        "Content-Encoding: gzip, deflate\r\n",
+        "Authorization: Basic dXNlcjpwYXNz\r\n",
+        "Invalid@Header: should be ignored\r\n",
+        "Another-Header: with, multiple, values\r\n",
+        "Whitespace-Header: value with spaces \r\n",
+        "\r\n"
     );
+
+    let (headers, header_metadata) = parse_headers(&mut raw_headers.as_bytes()).unwrap();
+
+    assert_eq!(
+        headers.get("host").unwrap(),
+        &vec!["example.com".to_string()]
+    );
+    assert_eq!(
+        headers.get("user-agent").unwrap(),
+        &vec!["gimbap-test/1.0".to_string()]
+    );
+    assert_eq!(
+        headers.get("accept").unwrap(),
+        &vec![
+            "text/html".to_string(),
+            "application/xhtml+xml".to_string(),
+            "application/xml;q=0.9".to_string(),
+            "*/*;q=0.8".to_string()
+        ]
+    );
+    assert_eq!(
+        headers.get("content-type").unwrap(),
+        &vec!["application/json".to_string()]
+    );
+    assert_eq!(
+        headers.get("content-length").unwrap(),
+        &vec!["42".to_string()]
+    );
+    assert_eq!(
+        headers.get("content-encoding").unwrap(),
+        &vec!["gzip".to_string(), "deflate".to_string()]
+    );
+
+    assert_eq!(
+        headers.get("authorization").unwrap(),
+        &vec!["Basic dXNlcjpwYXNz".to_string()]
+    );
+    assert_eq!(
+        headers.get("another-header").unwrap(),
+        &vec![
+            "with".to_string(),
+            "multiple".to_string(),
+            "values".to_string()
+        ]
+    );
+    assert_eq!(
+        headers.get("whitespace-header").unwrap(),
+        &vec!["value with spaces".to_string()]
+    );
+
+    assert!(!headers.contains_key("Invalid@Header"));
+
+    assert_eq!(header_metadata.host, Host::parse("example.com").unwrap());
+
+    let body_metadata = header_metadata.body_metadata.as_ref().unwrap();
+    assert_eq!(body_metadata.content_type, mime::APPLICATION_JSON);
+    assert_eq!(body_metadata.content_length, ContentLength::Fixed(42));
+    assert_eq!(
+        body_metadata.content_encoding.as_ref().unwrap(),
+        &[ContentEncoding::Gzip, ContentEncoding::Deflate]
+    );
+
+    let chunked_headers =
+        "Host: example.com\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n";
+    let (_, chunked_metadata) = parse_headers(&mut chunked_headers.as_bytes()).unwrap();
+    let chunked_body_metadata = chunked_metadata.body_metadata.as_ref().unwrap();
+    assert_eq!(chunked_body_metadata.content_type, mime::TEXT_PLAIN);
+    assert_eq!(chunked_body_metadata.content_length, ContentLength::Chunked);
+    assert_eq!(chunked_body_metadata.content_encoding, None);
+
+    let empty_headers = "\r\n";
+    let result = parse_headers(&mut empty_headers.as_bytes());
+    assert!(result.is_err());
 }
 
 #[test]
@@ -234,7 +376,7 @@ fn test_into_body_data_multipart_form_data() {
         "Content-Type: text/plain\r\n",
         "\r\n",
         "file content\r\n",
-        "--TestBoundary123--\r\n",
+        "--TestBoundary123--\r\n"
     )
     .as_bytes();
 
@@ -270,4 +412,14 @@ fn test_into_body_data_multipart_form_data() {
         }
         _ => panic!("Expected BodyData::FormData"),
     }
+}
+
+#[test]
+fn test_request_parser() {
+    let request = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    let result = parse_connection(request.as_bytes());
+    let request = result.unwrap();
+    assert_eq!(request.method, HttpMethod::GET);
+    assert_eq!(request.path, "/");
+    assert_eq!(request.version, HttpVersion::V1_1);
 }
