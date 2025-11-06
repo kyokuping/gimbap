@@ -347,7 +347,9 @@ impl Body {
                     );
 
                     if decode_result == encoding_rs::CoderResult::OutputFull {
-                        unreachable!("Output buffer is full when the buffer is String");
+                        unreachable!(
+                            "Output buffer is full when it is intended to be larger than the input buffer"
+                        );
                     }
 
                     let mut start_pos = 0;
