@@ -165,8 +165,8 @@ pub fn parse_headers<T: BufRead>(
     let mut header_metadata_builder = HeaderMetadataBuilder::create_empty();
     let mut body_metadata_builder = Lazy::new(BodyMetadataBuilder::create_empty);
 
-    for line_result in reader.lines() {
-        let line = line_result?;
+    for line in reader.lines() {
+        let line = line?;
         if line.is_empty() {
             break;
         }
