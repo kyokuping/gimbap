@@ -19,9 +19,6 @@ static HEADER_VALUE_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new("^[\\t\\u0020-\\u007E\\u0080-\\u00FF]*$").unwrap());
 static AUTHORIZATION_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^\\w+ .+$").unwrap());
-static ACCEPT_PART_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"^(\\*|\\w+)/(\\*|[-.\\w+]+)(;\\s*q=\\d(\\.\\d+)?)?$").unwrap()
-});
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum HttpMethod {
@@ -263,13 +260,10 @@ fn validate_special_header(key: &str, value: &str) -> bool {
     match key {
         "authorization" => AUTHORIZATION_REGEX.is_match(value),
         "accept" => {
-            if value.is_empty() {
-                false
-            } else {
-                value
+            !value.is_empty()
+                && value
                     .split(",")
-                    .all(|part| ACCEPT_PART_REGEX.is_match(part.trim()))
-            }
+                    .all(|part| Mime::from_str(part.trim()).is_ok())
         }
         _ => true,
     }
