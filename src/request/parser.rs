@@ -1,3 +1,4 @@
+use brotli::Decompressor as BrotliDecompressor;
 use derive_builder::Builder;
 use encoding_rs::UTF_8;
 use flate2::read::{DeflateDecoder, GzDecoder};
@@ -8,8 +9,10 @@ use std::io::{BufRead, Read};
 use std::str::FromStr;
 use std::sync::LazyLock;
 use url::Host;
+use zstd::stream::Decoder as ZstdDecoder;
 
 const MAX_BODY_SIZE: u64 = 10 * 1024 * 1024; // 10MB
+const BROTLI_BUFFER_SIZE: usize = 4096;
 
 static URL_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^([A-Z]+?) ([^ ]+?) (HTTP/[0-9.]+?)\s*$").unwrap());
@@ -315,8 +318,8 @@ impl Body {
         Ok(match encoding {
             ContentEncoding::Gzip => Box::new(GzDecoder::new(reader)),
             ContentEncoding::Deflate => Box::new(DeflateDecoder::new(reader)),
-            ContentEncoding::Br => Box::new(brotli::Decompressor::new(reader, 4096)),
-            ContentEncoding::Zstd => Box::new(zstd::stream::Decoder::new(reader)?),
+            ContentEncoding::Br => Box::new(BrotliDecompressor::new(reader, BROTLI_BUFFER_SIZE)),
+            ContentEncoding::Zstd => Box::new(ZstdDecoder::new(reader)?),
             ContentEncoding::Compress | ContentEncoding::Dcb | ContentEncoding::Dcz => {
                 return Err(format!("{:?} encoding not supported yet", encoding).into());
             }
