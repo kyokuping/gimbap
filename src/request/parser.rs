@@ -74,6 +74,161 @@ pub struct Request {
     pub header_metadata: HeaderMetadata,
     pub body: Option<Body>,
 }
+impl Request {
+    pub fn parse_connection<T: BufRead + 'static>(
+        mut reader: T,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut line = String::new();
+        let len = reader.read_line(&mut line)?;
+        if len == 0 {
+            return Err("Unexpected end of stream".into());
+        }
+        let (method, path, version) = Self::parse_start_line(&line)?;
+        let (headers, header_metadata) = Self::parse_headers(&mut reader)?;
+        let body = header_metadata
+            .body_metadata
+            .as_ref()
+            .map(|metadata| Body::new(reader, metadata.clone()));
+        Ok(Request {
+            method,
+            path,
+            version,
+            headers,
+            header_metadata,
+            body,
+        })
+    }
+
+    fn parse_start_line(line: &str) -> Result<(HttpMethod, String, HttpVersion), String> {
+        let captures = URL_REGEX.captures(line).ok_or("Invalid request line")?;
+        let method = HttpMethod::from_str(&captures[1]);
+        let url = captures[2].to_string();
+        let version = HttpVersion::from_str(&captures[3]);
+        Ok((method, url, version))
+    }
+
+    fn parse_headers<T: BufRead>(
+        reader: &mut T,
+    ) -> Result<ParsedHeader, Box<dyn std::error::Error>> {
+        let mut headers = HashMap::new();
+        let mut header_metadata_builder = HeaderMetadataBuilder::create_empty();
+        let mut body_metadata_builder = Lazy::new(BodyMetadataBuilder::create_empty);
+
+        for line in reader.lines() {
+            let line = line?;
+            if line.is_empty() {
+                break;
+            }
+
+            if let Some((key_str, values_str)) = line.split_once(":") {
+                let key = key_str.trim().to_lowercase();
+                if !HEADER_NAME_REGEX.is_match(&key) {
+                    continue;
+                }
+
+                let values: Vec<String> = values_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
+                if values
+                    .iter()
+                    .any(|value| !HEADER_VALUE_REGEX.is_match(value))
+                {
+                    continue;
+                }
+
+                if values
+                    .iter()
+                    .any(|value| !Self::is_special_header_valid(&key, value))
+                {
+                    continue;
+                }
+
+                match key.as_str() {
+                    "host" => match &*values {
+                        [host] => {
+                            header_metadata_builder.host(Host::parse(host)?);
+                        }
+                        [] => (),
+                        _ => return Err("unexpected host header value".into()),
+                    },
+                    "content-type" => match &*values {
+                        [content_type] => {
+                            body_metadata_builder.content_type(Mime::from_str(content_type)?);
+                        }
+                        [] => (),
+                        _ => return Err("unexpected content-type header value".into()),
+                    },
+                    "content-length" => match &*values {
+                        [length] => {
+                            body_metadata_builder
+                                .content_length(ContentLength::Fixed(length.parse()?));
+                        }
+                        [] => (),
+                        _ => return Err("unexpected content-length header value".into()),
+                    },
+                    "transfer-encoding" => match &*values {
+                        [encoding] => {
+                            if encoding == "chunked" {
+                                body_metadata_builder.content_length(ContentLength::Chunked);
+                            } else {
+                                return Err(format!(
+                                    "transfer-encoding `{encoding}` is not supported yet"
+                                )
+                                .into());
+                            }
+                        }
+                        [] => (),
+                        _ => return Err("unexpected transfer-encoding header value".into()),
+                    },
+                    "content-encoding" => {
+                        if !values.is_empty() {
+                            body_metadata_builder.content_encoding(Some(
+                                values
+                                    .iter()
+                                    .map(|v| ContentEncoding::from_str(v))
+                                    .collect::<Result<_, _>>()?,
+                            ));
+                        }
+                    }
+                    "boundary" => match &*values {
+                        [boundary] => {
+                            body_metadata_builder.boundary(Some(boundary.to_string()));
+                        }
+                        [] => (),
+                        _ => return Err("unexpected boundary header value".into()),
+                    },
+                    _ => {}
+                }
+
+                headers
+                    .entry(key)
+                    .or_insert_with(Vec::new)
+                    .extend_from_slice(&values);
+            }
+        }
+
+        header_metadata_builder.body_metadata(
+            Lazy::get(&body_metadata_builder)
+                .map(BodyMetadataBuilder::build)
+                .transpose()?,
+        );
+        Ok((headers, header_metadata_builder.build()?))
+    }
+
+    fn is_special_header_valid(key: &str, value: &str) -> bool {
+        match key {
+            "authorization" => AUTHORIZATION_REGEX.is_match(value),
+            "accept" => {
+                !value.is_empty()
+                    && value
+                        .split(",")
+                        .all(|part| Mime::from_str(part.trim()).is_ok())
+            }
+            _ => true,
+        }
+    }
+}
 
 #[derive(Builder, Debug)]
 pub struct HeaderMetadata {
@@ -127,150 +282,7 @@ impl FromStr for ContentEncoding {
     }
 }
 
-pub fn parse_connection<T: BufRead + 'static>(
-    mut reader: T,
-) -> Result<Request, Box<dyn std::error::Error>> {
-    let mut line = String::new();
-    let len = reader.read_line(&mut line)?;
-    if len == 0 {
-        return Err("Unexpected end of stream".into());
-    }
-    let (method, path, version) = parse_start_line(&line)?;
-    let (headers, header_metadata) = parse_headers(&mut reader)?;
-    let body = header_metadata
-        .body_metadata
-        .as_ref()
-        .map(|metadata| Body::new(reader, metadata.clone()));
-    Ok(Request {
-        method,
-        path,
-        version,
-        headers,
-        header_metadata,
-        body,
-    })
-}
-
-pub fn parse_start_line(line: &str) -> Result<(HttpMethod, String, HttpVersion), String> {
-    let captures = URL_REGEX.captures(line).ok_or("Invalid request line")?;
-    let method = HttpMethod::from_str(&captures[1]);
-    let url = captures[2].to_string();
-    let version = HttpVersion::from_str(&captures[3]);
-    Ok((method, url, version))
-}
-
 type ParsedHeader = (HashMap<String, Vec<String>>, HeaderMetadata);
-
-pub fn parse_headers<T: BufRead>(
-    reader: &mut T,
-) -> Result<ParsedHeader, Box<dyn std::error::Error>> {
-    let mut headers = HashMap::new();
-    let mut header_metadata_builder = HeaderMetadataBuilder::create_empty();
-    let mut body_metadata_builder = Lazy::new(BodyMetadataBuilder::create_empty);
-
-    for line in reader.lines() {
-        let line = line?;
-        if line.is_empty() {
-            break;
-        }
-
-        if let Some((key_str, values_str)) = line.split_once(":") {
-            let key = key_str.trim().to_lowercase();
-            if !HEADER_NAME_REGEX.is_match(&key) {
-                continue;
-            }
-
-            let values: Vec<String> = values_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect();
-            if values
-                .iter()
-                .any(|value| !HEADER_VALUE_REGEX.is_match(value))
-            {
-                continue;
-            }
-
-            if values
-                .iter()
-                .any(|value| !is_special_header_valid(&key, value))
-            {
-                continue;
-            }
-
-            match key.as_str() {
-                "host" => {
-                    if let Some(host) = values.first() {
-                        header_metadata_builder.host(Host::parse(host)?);
-                    }
-                }
-                "content-type" => {
-                    if let Some(content_type) = values.first() {
-                        body_metadata_builder.content_type(Mime::from_str(content_type)?);
-                    }
-                }
-                "content-length" => {
-                    if let Some(length) = values.first() {
-                        body_metadata_builder.content_length(ContentLength::Fixed(length.parse()?));
-                    }
-                }
-                "transfer-encoding" => {
-                    if let Some(encoding) = values.first() {
-                        if encoding == "chunked" {
-                            body_metadata_builder.content_length(ContentLength::Chunked);
-                        } else {
-                            return Err(format!(
-                                "transfer-encoding `{encoding}` is not supported yet"
-                            )
-                            .into());
-                        }
-                    }
-                }
-                "content-encoding" => {
-                    if !values.is_empty() {
-                        body_metadata_builder.content_encoding(Some(
-                            values
-                                .iter()
-                                .map(|v| ContentEncoding::from_str(v))
-                                .collect::<Result<_, _>>()?,
-                        ));
-                    }
-                }
-                "boundary" => {
-                    if let Some(boundary) = values.first() {
-                        body_metadata_builder.boundary(Some(boundary.to_string()));
-                    }
-                }
-                _ => {}
-            }
-
-            headers
-                .entry(key)
-                .or_insert_with(Vec::new)
-                .extend_from_slice(&values);
-        }
-    }
-
-    header_metadata_builder.body_metadata(
-        Lazy::get(&body_metadata_builder)
-            .map(BodyMetadataBuilder::build)
-            .transpose()?,
-    );
-    Ok((headers, header_metadata_builder.build()?))
-}
-
-fn is_special_header_valid(key: &str, value: &str) -> bool {
-    match key {
-        "authorization" => AUTHORIZATION_REGEX.is_match(value),
-        "accept" => {
-            !value.is_empty()
-                && value
-                    .split(",")
-                    .all(|part| Mime::from_str(part.trim()).is_ok())
-        }
-        _ => true,
-    }
-}
 
 pub struct Body {
     pub reader: Box<dyn Read>,
@@ -401,8 +413,8 @@ impl Body {
 
                     loop {
                         // buffer position
-                        let part_pos = find_subslice(&main_buf, part_boundary.as_bytes());
-                        let end_pos = find_subslice(&main_buf, end_boundary.as_bytes());
+                        let part_pos = Self::find_subslice(&main_buf, part_boundary.as_bytes());
+                        let end_pos = Self::find_subslice(&main_buf, end_boundary.as_bytes());
 
                         let (index, is_end_boundary, boundary_len) = match (part_pos, end_pos) {
                             (Some(part_pos), Some(end_pos)) => {
@@ -420,7 +432,8 @@ impl Body {
                         let part_data = &main_buf[..index];
 
                         if !part_data.is_empty() {
-                            let (name, value) = parse_part(&part_data[..(part_data.len() - 2)])?;
+                            let (name, value) =
+                                Self::parse_part(&part_data[..(part_data.len() - 2)])?;
                             data.insert(name, value);
                         }
 
@@ -457,7 +470,82 @@ impl Body {
             }
         })
     }
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    fn parse_part(part_data: &[u8]) -> Result<(String, FormDataValue), Box<dyn std::error::Error>> {
+        let separator = b"\r\n\r\n";
+        let sep_pos =
+            Self::find_subslice(part_data, separator).ok_or("missing header/body seperator")?;
+
+        let headers_raw = &part_data[..sep_pos];
+        let body_raw = &part_data[sep_pos + separator.len()..];
+
+        let (name, filename, content_type) = Self::parse_part_headers(headers_raw)?;
+
+        if let Some(filename) = filename {
+            Ok((
+                name,
+                FormDataValue::File {
+                    filename,
+                    content_type: content_type
+                        .unwrap_or_else(|| "application/octet-stream".to_string()),
+                    data: body_raw.to_vec(), //change this avoid OOM
+                },
+            ))
+        } else {
+            Ok((
+                name,
+                FormDataValue::Text(String::from_utf8(body_raw.to_vec())?), //change this avoid OOM
+            ))
+        }
+    }
+
+    fn parse_part_headers(headers_raw: &[u8]) -> Result<PartHeaders, Box<dyn std::error::Error>> {
+        let header_str = std::str::from_utf8(headers_raw);
+        let mut name = None;
+        let mut filename = None;
+        let mut content_type = None;
+
+        for line in header_str?.lines() {
+            if let Some((header_name, header_value)) = line.split_once(':') {
+                let header_name_lowercase = header_name.trim().to_lowercase();
+                let header_value = header_value.trim();
+
+                if header_name_lowercase == "content-disposition" {
+                    for param in header_value.split(';') {
+                        if let Some((key, value)) = param.trim().split_once('=') {
+                            let decoded_val =
+                                Self::decode_disposition_param(value.trim_matches('"'));
+
+                            match key.trim() {
+                                "name" => name = Some(decoded_val),
+                                "filename" => filename = Some(decoded_val),
+                                _ => {}
+                            }
+                        }
+                    }
+                } else if header_name_lowercase == "content-type" {
+                    content_type = Some(header_value.to_string());
+                }
+            }
+        }
+        let name = name.ok_or("missing 'name' in Content-Disposition")?;
+        Ok((name, filename, content_type))
+    }
+
+    fn decode_disposition_param(s: &str) -> String {
+        s.replace("%0A", "\n")
+            .replace("%0D", "\r")
+            .replace("%22", "\"")
+    }
 }
+
+type PartHeaders = (String, Option<String>, Option<String>);
 
 pub enum BodyData {
     Json(serde_json::Value),
@@ -474,76 +562,214 @@ pub enum FormDataValue {
         data: Vec<u8>, // use PathBuf for OOM
     },
 }
+#[cfg(test)]
+mod test {
+    use super::*;
 
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
+    #[test]
+    fn test_parse_start_line_comprehensive() {
+        type TestCase<'a> = (HttpMethod, &'a str, HttpVersion);
+        let test_cases: Vec<(&str, Result<TestCase<'_>, &str>)> = vec![
+            (
+                "GET / HTTP/1.1",
+                Ok((HttpMethod::GET, "/", HttpVersion::V1_1)),
+            ),
+            (
+                "POST /submit HTTP/1.1",
+                Ok((HttpMethod::POST, "/submit", HttpVersion::V1_1)),
+            ),
+            (
+                "PUT /items/123 HTTP/1.1",
+                Ok((HttpMethod::PUT, "/items/123", HttpVersion::V1_1)),
+            ),
+            (
+                "DELETE /items/123 HTTP/1.1",
+                Ok((HttpMethod::DELETE, "/items/123", HttpVersion::V1_1)),
+            ),
+            (
+                "PATCH /items/123 HTTP/1.1",
+                Ok((HttpMethod::PATCH, "/items/123", HttpVersion::V1_1)),
+            ),
+            (
+                "HEAD / HTTP/1.1",
+                Ok((HttpMethod::HEAD, "/", HttpVersion::V1_1)),
+            ),
+            (
+                "CUSTOM /api HTTP/1.1",
+                Ok((
+                    HttpMethod::Other("CUSTOM".to_string()),
+                    "/api",
+                    HttpVersion::V1_1,
+                )),
+            ),
+            (
+                "GET /path/with/multiple/segments HTTP/1.1",
+                Ok((
+                    HttpMethod::GET,
+                    "/path/with/multiple/segments",
+                    HttpVersion::V1_1,
+                )),
+            ),
+            (
+                "GET /search?q=test&lang=ko HTTP/1.1",
+                Ok((HttpMethod::GET, "/search?q=test&lang=ko", HttpVersion::V1_1)),
+            ),
+            (
+                "GET /path-with-hyphen_and_underscore HTTP/1.1",
+                Ok((
+                    HttpMethod::GET,
+                    "/path-with-hyphen_and_underscore",
+                    HttpVersion::V1_1,
+                )),
+            ),
+            (
+                "GET /path.with.dots HTTP/1.1",
+                Ok((HttpMethod::GET, "/path.with.dots", HttpVersion::V1_1)),
+            ),
+            ("GET /", Err("Invalid request line")),
+            ("GET HTTP/1.1", Err("Invalid request line")),
+            ("GET / TTP/1.1", Err("Invalid request line")),
+            ("GET  /two-spaces HTTP/1.1", Err("Invalid request line")),
+            ("", Err("Invalid request line")),
+            ("\r\n", Err("Invalid request line")),
+        ];
 
-fn parse_part(part_data: &[u8]) -> Result<(String, FormDataValue), Box<dyn std::error::Error>> {
-    let separator = b"\r\n\r\n";
-    let sep_pos = find_subslice(part_data, separator).ok_or("missing header/body seperator")?;
-
-    let headers_raw = &part_data[..sep_pos];
-    let body_raw = &part_data[sep_pos + separator.len()..];
-
-    let (name, filename, content_type) = parse_part_headers(headers_raw)?;
-
-    if let Some(filename) = filename {
-        Ok((
-            name,
-            FormDataValue::File {
-                filename,
-                content_type: content_type
-                    .unwrap_or_else(|| "application/octet-stream".to_string()),
-                data: body_raw.to_vec(), //change this avoid OOM
-            },
-        ))
-    } else {
-        Ok((
-            name,
-            FormDataValue::Text(String::from_utf8(body_raw.to_vec())?), //change this avoid OOM
-        ))
-    }
-}
-
-fn parse_part_headers(
-    headers_raw: &[u8],
-) -> Result<(String, Option<String>, Option<String>), Box<dyn std::error::Error>> {
-    let header_str = std::str::from_utf8(headers_raw);
-    let mut name = None;
-    let mut filename = None;
-    let mut content_type = None;
-
-    for line in header_str?.lines() {
-        if let Some((header_name, header_value)) = line.split_once(':') {
-            let header_name_lowercase = header_name.trim().to_lowercase();
-            let header_value = header_value.trim();
-
-            if header_name_lowercase == "content-disposition" {
-                for param in header_value.split(';') {
-                    if let Some((key, value)) = param.trim().split_once('=') {
-                        let decoded_val = decode_disposition_param(value.trim_matches('"'));
-
-                        match key.trim() {
-                            "name" => name = Some(decoded_val),
-                            "filename" => filename = Some(decoded_val),
-                            _ => {}
-                        }
-                    }
+        for (input, expected) in test_cases {
+            let result = Request::parse_start_line(input);
+            match (result, expected) {
+                (Ok((method, path, version)), Ok((exp_method, exp_path, exp_version))) => {
+                    assert_eq!(
+                        method, exp_method,
+                        "Mismatch in method for input: {}",
+                        input
+                    );
+                    assert_eq!(path, exp_path, "Mismatch in path for input: {}", input);
+                    assert_eq!(
+                        version, exp_version,
+                        "Mismatch in version for input: {}",
+                        input
+                    );
                 }
-            } else if header_name_lowercase == "content-type" {
-                content_type = Some(header_value.to_string());
+                (Err(e), Err(exp_e)) => {
+                    assert_eq!(e, exp_e, "Mismatch in error for input: {}", input);
+                }
+                (res, exp) => {
+                    panic!(
+                        "Result {:?} does not match expected {:?} for input: {}",
+                        res, exp, input
+                    );
+                }
             }
         }
     }
-    let name = name.ok_or("missing 'name' in Content-Disposition")?;
-    Ok((name, filename, content_type))
-}
 
-fn decode_disposition_param(s: &str) -> String {
-    s.replace("%0A", "\n")
-        .replace("%0D", "\r")
-        .replace("%22", "\"")
+    #[test]
+    #[should_panic(expected = "Unsupported HTTP version")]
+    fn test_parse_start_line_unsupported_version_panic() {
+        let http_1_0 = "GET / HTTP/2.0";
+        let _ = Request::parse_start_line(http_1_0);
+    }
+
+    #[test]
+    fn test_parse_headers_comprehensive() {
+        let raw_headers = concat!(
+            "Host: example.com\r\n",
+            "User-Agent: gimbap-test/1.0\r\n",
+            "ACCEPT: text/html, application/xhtml+xml, application/xml;q=0.9, */*;q=0.8\r\n",
+            "content-type: application/json\r\n",
+            "Content-Length: 42\r\n",
+            "Content-Encoding: gzip, deflate\r\n",
+            "Authorization: Basic dXNlcjpwYXNz\r\n",
+            "Invalid@Header: should be ignored\r\n",
+            "Another-Header: with, multiple, values\r\n",
+            "Whitespace-Header: value with spaces \r\n",
+            "\r\n"
+        );
+
+        let (headers, header_metadata) =
+            Request::parse_headers(&mut raw_headers.as_bytes()).unwrap();
+
+        assert_eq!(
+            headers.get("host").unwrap(),
+            &vec!["example.com".to_string()]
+        );
+        assert_eq!(
+            headers.get("user-agent").unwrap(),
+            &vec!["gimbap-test/1.0".to_string()]
+        );
+        assert_eq!(
+            headers.get("accept").unwrap(),
+            &vec![
+                "text/html".to_string(),
+                "application/xhtml+xml".to_string(),
+                "application/xml;q=0.9".to_string(),
+                "*/*;q=0.8".to_string()
+            ]
+        );
+        assert_eq!(
+            headers.get("content-type").unwrap(),
+            &vec!["application/json".to_string()]
+        );
+        assert_eq!(
+            headers.get("content-length").unwrap(),
+            &vec!["42".to_string()]
+        );
+        assert_eq!(
+            headers.get("content-encoding").unwrap(),
+            &vec!["gzip".to_string(), "deflate".to_string()]
+        );
+
+        assert_eq!(
+            headers.get("authorization").unwrap(),
+            &vec!["Basic dXNlcjpwYXNz".to_string()]
+        );
+        assert_eq!(
+            headers.get("another-header").unwrap(),
+            &vec![
+                "with".to_string(),
+                "multiple".to_string(),
+                "values".to_string()
+            ]
+        );
+        assert_eq!(
+            headers.get("whitespace-header").unwrap(),
+            &vec!["value with spaces".to_string()]
+        );
+
+        assert!(!headers.contains_key("Invalid@Header"));
+
+        assert_eq!(header_metadata.host, Host::parse("example.com").unwrap());
+
+        let body_metadata = header_metadata.body_metadata.as_ref().unwrap();
+        assert_eq!(body_metadata.content_type, mime::APPLICATION_JSON);
+        assert_eq!(body_metadata.content_length, ContentLength::Fixed(42));
+        assert_eq!(
+            body_metadata.content_encoding.as_ref().unwrap(),
+            &[ContentEncoding::Gzip, ContentEncoding::Deflate]
+        );
+
+        let chunked_headers =
+            "Host: example.com\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let (_, chunked_metadata) =
+            Request::parse_headers(&mut chunked_headers.as_bytes()).unwrap();
+        let chunked_body_metadata = chunked_metadata.body_metadata.as_ref().unwrap();
+        assert_eq!(chunked_body_metadata.content_type, mime::TEXT_PLAIN);
+        assert_eq!(chunked_body_metadata.content_length, ContentLength::Chunked);
+        assert_eq!(chunked_body_metadata.content_encoding, None);
+
+        let empty_headers = "\r\n";
+        let result = Request::parse_headers(&mut empty_headers.as_bytes());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transfer_encoding_identity() {
+        let headers =
+            "Host: example.com\r\nContent-Type: text/plain\r\nTransfer-Encoding: identity\r\n\r\n";
+        let result = Request::parse_headers(&mut headers.as_bytes());
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        let expected_error_message = "transfer-encoding `identity` is not supported yet";
+        assert_eq!(error.to_string(), expected_error_message);
+    }
 }
