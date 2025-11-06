@@ -248,11 +248,11 @@ pub fn parse_headers<T: BufRead>(
         }
     }
 
-    let body_metadata = match Lazy::get(&body_metadata_builder) {
-        Some(builder) => Some(builder.build()?),
-        None => None,
-    };
-    header_metadata_builder.body_metadata(body_metadata);
+    header_metadata_builder.body_metadata(
+        Lazy::get(&body_metadata_builder)
+            .map(BodyMetadataBuilder::build)
+            .transpose()?,
+    );
     Ok((headers, header_metadata_builder.build()?))
 }
 
