@@ -278,27 +278,17 @@ pub struct Body {
 }
 
 impl Body {
-    pub fn try_new<T: Read + 'static>(
-        reader: T,
-        metadata: BodyMetadata,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(match metadata.content_length {
-            ContentLength::Fixed(length) if length > 0 => Body {
-                reader: Box::new(reader),
-                encoding: metadata.content_encoding,
-                size_hint: Some(length),
-                content_type: metadata.content_type,
-                boundary: metadata.boundary,
+    pub fn new<T: Read + 'static>(reader: T, metadata: BodyMetadata) -> Self {
+        Body {
+            reader: Box::new(reader),
+            encoding: metadata.content_encoding,
+            size_hint: match metadata.content_length {
+                ContentLength::Fixed(length) => Some(length),
+                ContentLength::Chunked => None,
             },
-            ContentLength::Fixed(_) => return Err("Invalid content length".into()),
-            ContentLength::Chunked => Body {
-                reader: Box::new(reader),
-                encoding: metadata.content_encoding,
-                size_hint: None,
-                content_type: metadata.content_type,
-                boundary: metadata.boundary,
-            },
-        })
+            content_type: metadata.content_type,
+            boundary: metadata.boundary,
+        }
     }
 
     pub fn into_reader(self) -> Result<Box<dyn Read + 'static>, Box<dyn std::error::Error>> {
