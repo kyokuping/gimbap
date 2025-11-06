@@ -134,10 +134,10 @@ pub fn parse_connection<T: BufRead + 'static>(
     }
     let (method, path, version) = parse_start_line(&line)?;
     let (headers, header_metadata) = parse_headers(&mut reader)?;
-    let body = match &header_metadata.body_metadata {
-        Some(metadata) => Some(Body::try_new(reader, metadata.clone())?),
-        None => None,
-    };
+    let body = header_metadata
+        .body_metadata
+        .as_ref()
+        .map(|metadata| Body::new(reader, metadata.clone()));
     Ok(Request {
         method,
         path,
