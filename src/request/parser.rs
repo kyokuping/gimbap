@@ -18,7 +18,7 @@ static HEADER_NAME_REGEX: LazyLock<regex::Regex> =
 static HEADER_VALUE_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new("^[\\t\\u0020-\\u007E\\u0080-\\u00FF]*$").unwrap());
 static AUTHORIZATION_REGEX: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"^\\w+ .+$").unwrap());
+    LazyLock::new(|| regex::Regex::new(r"^\w+ .+$").unwrap());
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum HttpMethod {
