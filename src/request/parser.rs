@@ -234,8 +234,8 @@ pub fn parse_headers<T: BufRead>(
                     }
                 }
                 "boundary" => {
-                    if !values.is_empty() {
-                        body_metadata_builder.boundary(Some(values[0].to_string()));
+                    if let Some(boundary) = values.first() {
+                        body_metadata_builder.boundary(Some(boundary.to_string()));
                     }
                 }
                 _ => {}
