@@ -6,13 +6,16 @@ use mime::Mime;
 use once_cell::unsync::Lazy;
 use std::collections::HashMap;
 use std::io::{BufRead, Read};
+use std::io::{Seek, SeekFrom, Write};
 use std::str::FromStr;
 use std::sync::LazyLock;
+use tempfile::{SpooledTempFile, spooled_tempfile};
 use url::Host;
 use zstd::stream::Decoder as ZstdDecoder;
 
 const MAX_BODY_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 const BROTLI_BUFFER_SIZE: usize = 4096;
+const SPOOLED_TEMPFILE_MAX_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
 static URL_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^([A-Z]+?) ([^ ]+?) (HTTP/[0-9.]+?)\s*$").unwrap());
@@ -483,24 +486,28 @@ impl Body {
             Self::find_subslice(part_data, separator).ok_or("missing header/body seperator")?;
 
         let headers_raw = &part_data[..sep_pos];
-        let body_raw = &part_data[sep_pos + separator.len()..];
 
         let (name, filename, content_type) = Self::parse_part_headers(headers_raw)?;
 
         if let Some(filename) = filename {
+            let mut temp_file = spooled_tempfile(SPOOLED_TEMPFILE_MAX_SIZE);
+            temp_file.write_all(&part_data[sep_pos + separator.len()..])?;
+            temp_file.seek(SeekFrom::Start(0))?;
             Ok((
                 name,
                 FormDataValue::File {
                     filename,
                     content_type: content_type
                         .unwrap_or_else(|| "application/octet-stream".to_string()),
-                    data: body_raw.to_vec(), //change this avoid OOM
+                    data: temp_file,
                 },
             ))
         } else {
+            let body_raw = &part_data[sep_pos + separator.len()..];
+            println!("body_raw: {:?}", body_raw);
             Ok((
                 name,
-                FormDataValue::Text(String::from_utf8(body_raw.to_vec())?), //change this avoid OOM
+                FormDataValue::Text(String::from_utf8(body_raw.to_vec())?),
             ))
         }
     }
@@ -559,9 +566,10 @@ pub enum FormDataValue {
     File {
         filename: String,
         content_type: String,
-        data: Vec<u8>, // use PathBuf for OOM
+        data: SpooledTempFile,
     },
 }
+
 #[cfg(test)]
 mod test {
     use super::*;

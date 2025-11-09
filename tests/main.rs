@@ -184,21 +184,23 @@ fn test_into_body_data_multipart_form_data() {
 
     let body_data = body.into_body_data().unwrap();
     match body_data {
-        BodyData::FormData(data) => {
+        BodyData::FormData(mut data) => {
             assert_eq!(data.len(), 2);
             match data.get("key1") {
                 Some(FormDataValue::Text(text)) => assert_eq!(text, "value1"),
                 _ => panic!("Expected text value for key1"),
             }
-            match data.get("key2") {
+            match data.get_mut("key2") {
                 Some(FormDataValue::File {
                     filename,
                     content_type,
                     data,
                 }) => {
+                    let mut buf = Vec::new();
+                    data.read_to_end(&mut buf).unwrap();
                     assert_eq!(filename, "file.txt");
                     assert_eq!(content_type, "text/plain");
-                    assert_eq!(data, b"file content");
+                    assert_eq!(&buf, b"file content");
                 }
                 _ => panic!("Expected file value for key2"),
             }
