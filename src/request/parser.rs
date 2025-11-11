@@ -80,7 +80,20 @@ pub struct Request {
 }
 impl Request {
     pub fn parse_connection<T: BufRead + 'static>(
+        reader: T,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::parse_connection_inner(reader, false)
+    }
+
+    pub fn parse_secure_connection<T: BufRead + 'static>(
+        reader: T,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::parse_connection_inner(reader, true)
+    }
+
+    fn parse_connection_inner<T: BufRead + 'static>(
         mut reader: T,
+        is_secure: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut line = String::new();
         let len = reader.read_line(&mut line)?;
@@ -88,9 +101,13 @@ impl Request {
             return Err("Unexpected end of stream".into());
         }
         let (method, path, version) = Self::parse_start_line(&line)?;
-        let (headers, header_metadata) = Self::parse_headers(&mut reader)?;
+        let (headers, header_metadata) = Self::parse_headers(&mut reader, is_secure)?;
+        let proto = match header_metadata.is_secure {
+            true => "https",
+            false => "http",
+        };
         let host = &header_metadata.host;
-        let url = Url::parse(&format!("http://{host}{path}"))?;
+        let url = Url::parse(&format!("{proto}://{host}{path}"))?;
         let body = header_metadata
             .body_metadata
             .as_ref()
@@ -115,10 +132,13 @@ impl Request {
 
     fn parse_headers<T: BufRead>(
         reader: &mut T,
+        is_secure: bool,
     ) -> Result<ParsedHeader, Box<dyn std::error::Error>> {
         let mut headers = HashMap::new();
         let mut header_metadata_builder = HeaderMetadataBuilder::create_empty();
         let mut body_metadata_builder = Lazy::new(BodyMetadataBuilder::create_empty);
+
+        header_metadata_builder.is_secure(is_secure);
 
         for line in reader.lines() {
             let line = line?;
@@ -204,6 +224,13 @@ impl Request {
                         [] => (),
                         _ => return Err("unexpected boundary header value".into()),
                     },
+                    "x-forwarded-proto" => match &*values {
+                        [proto] if proto == "https" => {
+                            header_metadata_builder.is_secure(true);
+                        }
+                        [_] | [] => (),
+                        _ => return Err("unexpected x-forwarded-proto header value".into()),
+                    },
                     _ => {}
                 }
 
@@ -240,6 +267,7 @@ impl Request {
 pub struct HeaderMetadata {
     pub host: Host,
     pub body_metadata: Option<BodyMetadata>,
+    pub is_secure: bool,
 }
 
 #[derive(Clone, Builder, Debug)]
@@ -698,7 +726,7 @@ mod test {
         );
 
         let (headers, header_metadata) =
-            Request::parse_headers(&mut raw_headers.as_bytes()).unwrap();
+            Request::parse_headers(&mut raw_headers.as_bytes(), false).unwrap();
 
         assert_eq!(
             headers.get("host").unwrap(),

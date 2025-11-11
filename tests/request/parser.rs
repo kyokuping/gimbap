@@ -218,3 +218,49 @@ fn test_request_parser() {
     assert_eq!(request.url.path(), "/");
     assert_eq!(request.version, HttpVersion::V1_1);
 }
+
+#[test]
+fn test_parse_http_connection() {
+    let request_str = "GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    let request = Request::parse_connection(request_str.as_bytes()).unwrap();
+
+    assert_eq!(request.method, HttpMethod::GET);
+    assert_eq!(request.url.scheme(), "http");
+    assert_eq!(request.url.host_str().unwrap(), "example.com");
+    assert_eq!(request.url.path(), "/test");
+}
+
+#[test]
+fn test_parse_https_connection() {
+    let request_str = "GET /secure HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    let request = Request::parse_secure_connection(request_str.as_bytes()).unwrap();
+
+    assert_eq!(request.method, HttpMethod::GET);
+    assert_eq!(request.url.scheme(), "https");
+    assert_eq!(request.url.host_str().unwrap(), "example.com");
+    assert_eq!(request.url.path(), "/secure");
+}
+
+#[test]
+fn test_parse_http_connection_with_x_forwarded_proto() {
+    let request_str =
+        "GET /forwarded HTTP/1.1\r\nHost: example.com\r\nX-Forwarded-Proto: https\r\n\r\n";
+    let request = Request::parse_connection(request_str.as_bytes()).unwrap();
+
+    assert_eq!(request.method, HttpMethod::GET);
+    assert_eq!(request.url.scheme(), "https");
+    assert_eq!(request.url.host_str().unwrap(), "example.com");
+    assert_eq!(request.url.path(), "/forwarded");
+}
+
+#[test]
+fn test_parse_https_connection_with_x_forwarded_proto_http() {
+    let request_str =
+        "GET /forwarded HTTP/1.1\r\nHost: example.com\r\nX-Forwarded-Proto: http\r\n\r\n";
+    let request = Request::parse_secure_connection(request_str.as_bytes()).unwrap();
+
+    assert_eq!(request.method, HttpMethod::GET);
+    assert_eq!(request.url.scheme(), "https");
+    assert_eq!(request.url.host_str().unwrap(), "example.com");
+    assert_eq!(request.url.path(), "/forwarded");
+}
