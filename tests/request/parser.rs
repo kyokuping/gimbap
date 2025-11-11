@@ -215,6 +215,6 @@ fn test_request_parser() {
     let result = Request::parse_connection(request.as_bytes());
     let request = result.unwrap();
     assert_eq!(request.method, HttpMethod::GET);
-    assert_eq!(request.path, "/");
+    assert_eq!(request.url.path(), "/");
     assert_eq!(request.version, HttpVersion::V1_1);
 }

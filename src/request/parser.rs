@@ -11,6 +11,7 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 use tempfile::{SpooledTempFile, spooled_tempfile};
 use url::Host;
+use url::Url;
 use zstd::stream::Decoder as ZstdDecoder;
 
 const MAX_BODY_SIZE: u64 = 10 * 1024 * 1024; // 10MB
@@ -71,7 +72,7 @@ impl HttpVersion {
 
 pub struct Request {
     pub method: HttpMethod,
-    pub path: String,
+    pub url: Url,
     pub version: HttpVersion,
     pub headers: HashMap<String, Vec<String>>,
     pub header_metadata: HeaderMetadata,
@@ -88,13 +89,15 @@ impl Request {
         }
         let (method, path, version) = Self::parse_start_line(&line)?;
         let (headers, header_metadata) = Self::parse_headers(&mut reader)?;
+        let host = &header_metadata.host;
+        let url = Url::parse(&format!("http://{host}{path}"))?;
         let body = header_metadata
             .body_metadata
             .as_ref()
             .map(|metadata| Body::new(reader, metadata.clone()));
         Ok(Request {
             method,
-            path,
+            url,
             version,
             headers,
             header_metadata,
@@ -759,14 +762,14 @@ mod test {
         let chunked_headers =
             "Host: example.com\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n";
         let (_, chunked_metadata) =
-            Request::parse_headers(&mut chunked_headers.as_bytes()).unwrap();
+            Request::parse_headers(&mut chunked_headers.as_bytes(), false).unwrap();
         let chunked_body_metadata = chunked_metadata.body_metadata.as_ref().unwrap();
         assert_eq!(chunked_body_metadata.content_type, mime::TEXT_PLAIN);
         assert_eq!(chunked_body_metadata.content_length, ContentLength::Chunked);
         assert_eq!(chunked_body_metadata.content_encoding, None);
 
         let empty_headers = "\r\n";
-        let result = Request::parse_headers(&mut empty_headers.as_bytes());
+        let result = Request::parse_headers(&mut empty_headers.as_bytes(), false);
         assert!(result.is_err());
     }
 
@@ -774,7 +777,7 @@ mod test {
     fn test_transfer_encoding_identity() {
         let headers =
             "Host: example.com\r\nContent-Type: text/plain\r\nTransfer-Encoding: identity\r\n\r\n";
-        let result = Request::parse_headers(&mut headers.as_bytes());
+        let result = Request::parse_headers(&mut headers.as_bytes(), false);
         assert!(result.is_err());
         let error = result.unwrap_err();
         let expected_error_message = "transfer-encoding `identity` is not supported yet";
