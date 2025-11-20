@@ -14,6 +14,8 @@ use url::Host;
 use url::Url;
 use zstd::stream::Decoder as ZstdDecoder;
 
+use crate::common::HttpMethod;
+
 const MAX_BODY_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 const BROTLI_BUFFER_SIZE: usize = 4096;
 const SPOOLED_TEMPFILE_MAX_SIZE: usize = 10 * 1024 * 1024; // 10MB
@@ -26,35 +28,6 @@ static HEADER_VALUE_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new("^[\\t\\u0020-\\u007E\\u0080-\\u00FF]*$").unwrap());
 static AUTHORIZATION_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^\w+ .+$").unwrap());
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum HttpMethod {
-    GET,
-    HEAD,
-    POST,
-    PUT,
-    DELETE,
-    CONNECT,
-    TRACE,
-    PATCH,
-    Other(String),
-}
-
-impl HttpMethod {
-    fn from_str(method: &str) -> Self {
-        match method {
-            "GET" => HttpMethod::GET,
-            "HEAD" => HttpMethod::HEAD,
-            "POST" => HttpMethod::POST,
-            "PUT" => HttpMethod::PUT,
-            "DELETE" => HttpMethod::DELETE,
-            "CONNECT" => HttpMethod::CONNECT,
-            "TRACE" => HttpMethod::TRACE,
-            "PATCH" => HttpMethod::PATCH,
-            _ => HttpMethod::Other(method.to_string()),
-        }
-    }
-}
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum HttpVersion {
@@ -78,6 +51,7 @@ pub struct Request {
     pub header_metadata: HeaderMetadata,
     pub body: Option<Body>,
 }
+
 impl Request {
     pub fn parse_connection<T: BufRead + 'static>(
         reader: T,
@@ -124,7 +98,7 @@ impl Request {
 
     fn parse_start_line(line: &str) -> Result<(HttpMethod, String, HttpVersion), String> {
         let captures = URL_REGEX.captures(line).ok_or("Invalid request line")?;
-        let method = HttpMethod::from_str(&captures[1]);
+        let method = HttpMethod::from_str(&captures[1]).unwrap();
         let url = captures[2].to_string();
         let version = HttpVersion::from_str(&captures[3]);
         Ok((method, url, version))
