@@ -1,5 +1,26 @@
 use std::{convert::Infallible, str::FromStr};
 
+pub struct StatusCode(u16);
+#[derive(Debug)]
+pub struct InvalidStatusCode;
+
+impl StatusCode {
+    pub fn from_u16(code: u16) -> Result<StatusCode, InvalidStatusCode> {
+        if (100..=999).contains(&code) {
+            Ok(StatusCode(code))
+        } else {
+            Err(InvalidStatusCode)
+        }
+    }
+    pub fn as_u16(&self) -> u16 {
+        self.0
+    }
+
+    pub const OK: StatusCode = StatusCode(200);
+    pub const NOT_FOUND: StatusCode = StatusCode(404);
+    pub const INTERNAL_SERVER_ERROR: StatusCode = StatusCode(500);
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum HttpMethod {
     GET,
