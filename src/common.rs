@@ -18,6 +18,7 @@ impl StatusCode {
 
     pub const OK: StatusCode = StatusCode(200);
     pub const NOT_FOUND: StatusCode = StatusCode(404);
+    pub const METHOD_NOT_ALLOWED: StatusCode = StatusCode(405);
     pub const INTERNAL_SERVER_ERROR: StatusCode = StatusCode(500);
 }
 
