@@ -1,6 +1,7 @@
 use crate::common::HttpMethod;
 use parser::Request as RawRequest;
 use percent_encoding::percent_decode_str;
+use serde_json::Value;
 use std::collections::HashMap;
 
 pub mod parser;
@@ -38,7 +39,7 @@ impl Request {
     }
 
     pub fn path(&self) -> &str {
-        &self.raw_request.url.path()
+        self.raw_request.url.path()
     }
 
     pub fn query(&self) -> &Query {
@@ -51,6 +52,25 @@ impl Request {
 
     pub fn body(&self) -> Option<&[u8]> {
         self.body.as_deref()
+    }
+
+    pub fn header(&self, key: &str) -> Option<&Vec<String>> {
+        self.raw_request.headers.get(&key.to_lowercase())
+    }
+
+    pub fn headers(&self) -> &HashMap<String, Vec<String>> {
+        &self.raw_request.headers
+    }
+
+    pub fn has_header(&self, key: &str) -> bool {
+        self.raw_request.headers.contains_key(&key.to_lowercase())
+    }
+
+    pub fn header_contains(&self, key: &str, value: &str) -> bool {
+        if let Some(values) = self.raw_request.headers.get(&key.to_lowercase()) {
+            return values.iter().any(|v| v == value);
+        }
+        false
     }
 }
 
