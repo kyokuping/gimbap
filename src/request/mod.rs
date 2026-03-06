@@ -1,4 +1,4 @@
-use crate::common::{HttpMethod, BodyData};
+use crate::common::{BodyData, Headers, HttpMethod};
 use parser::{Body, Request as RawRequest};
 use percent_encoding::percent_decode_str;
 use serde::de::DeserializeOwned;
@@ -12,7 +12,7 @@ pub struct Request {
     pub segments: Vec<String>,
     query: Query,
     pub params: Params,
-    headers: HashMap<String, Vec<String>>,
+    headers: Headers,
     content_type: Option<mime::Mime>,
     uri: Url,
     body: Option<Body>,
@@ -35,7 +35,7 @@ impl Request {
         self.headers.get(&key.to_lowercase())
     }
 
-    pub fn headers(&self) -> &HashMap<String, Vec<String>> {
+    pub fn headers(&self) -> &Headers {
         &self.headers
     }
 
