@@ -1,8 +1,8 @@
 use flate2::Compression;
 use flate2::read::GzEncoder;
-use gimbap::common::HttpMethod;
+use gimbap::common::{BodyData,HttpMethod, FormDataValue};
 use gimbap::request::parser::{
-    Body, BodyData, ContentEncoding, FormDataValue, HttpVersion, Request,
+    Body, ContentEncoding, HttpVersion, Request,
 };
 use std::collections::HashMap;
 use std::io::{self, Read};
@@ -14,7 +14,7 @@ fn test_into_reader_empty() {
         reader: Box::new(empty_reader),
         size_hint: Some(0),
         encoding: None,
-        content_type: mime::TEXT_PLAIN,
+        content_type: Some(mime::TEXT_PLAIN),
         boundary: None,
     };
 
@@ -36,7 +36,7 @@ fn test_into_reader_none_encoded() {
         reader: Box::new(reader),
         size_hint: Some(hello.len() as u64),
         encoding: None,
-        content_type: mime::TEXT_PLAIN,
+        content_type: Some(mime::TEXT_PLAIN),
         boundary: None,
     };
 
@@ -58,7 +58,7 @@ fn test_into_reader_single_encoded() {
         reader: Box::new(gzip_encoded_reader),
         size_hint: Some(hello.len() as u64),
         encoding: Some(vec![ContentEncoding::Gzip]),
-        content_type: mime::TEXT_PLAIN,
+        content_type: Some(mime::TEXT_PLAIN),
         boundary: None,
     };
 
@@ -81,7 +81,7 @@ fn test_into_reader_multiple_encoded() {
         reader: Box::new(brotli_encoded_reader),
         size_hint: Some(hello.len() as u64),
         encoding: Some(vec![ContentEncoding::Gzip, ContentEncoding::Br]),
-        content_type: mime::TEXT_PLAIN,
+        content_type: Some(mime::TEXT_PLAIN),
         boundary: None,
     };
 
@@ -101,7 +101,7 @@ fn test_into_body_data_text_plain() {
         reader: Box::new(text.as_bytes()),
         size_hint: Some(text.len() as u64),
         encoding: None,
-        content_type: mime::TEXT_PLAIN,
+        content_type: Some(mime::TEXT_PLAIN),
         boundary: None,
     };
 
@@ -119,7 +119,7 @@ fn test_into_body_data_x_www_form_urlencoded() {
         reader: Box::new(form_data.as_bytes()),
         size_hint: Some(form_data.len() as u64),
         encoding: None,
-        content_type: mime::APPLICATION_WWW_FORM_URLENCODED,
+        content_type: Some(mime::APPLICATION_WWW_FORM_URLENCODED),
         boundary: None,
     };
 
@@ -179,7 +179,7 @@ fn test_into_body_data_multipart_form_data() {
         reader: Box::new(std::io::Cursor::new(multipart_data)),
         size_hint: Some(multipart_data_len as u64),
         encoding: None,
-        content_type: mime::MULTIPART_FORM_DATA,
+        content_type: Some(mime::MULTIPART_FORM_DATA),
         boundary: Some(boundary.to_string()),
     };
 

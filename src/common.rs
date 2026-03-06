@@ -1,4 +1,29 @@
+use mime::Mime;
+use std::collections::HashMap;
 use std::{convert::Infallible, str::FromStr};
+use tempfile::SpooledTempFile;
+
+#[derive(Debug)]
+pub enum BodyData {
+    Json(serde_json::Value),
+    FormData(HashMap<String, FormDataValue>),
+    Text(String),
+    Other {
+        content_type: Option<Mime>,
+        data: Vec<u8>,
+    },
+    Empty,
+}
+
+#[derive(Debug)]
+pub enum FormDataValue {
+    Text(String),
+    File {
+        filename: String,
+        content_type: String,
+        data: SpooledTempFile,
+    },
+}
 
 pub struct StatusCode(u16);
 #[derive(Debug)]

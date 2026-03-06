@@ -1,45 +1,26 @@
-use crate::common::HttpMethod;
-use parser::Request as RawRequest;
+use crate::common::{HttpMethod, BodyData};
+use parser::{Body, Request as RawRequest};
 use percent_encoding::percent_decode_str;
-use serde_json::Value;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
+use url::Url;
 
 pub mod parser;
 
 pub struct Request {
-    #[allow(dead_code)]
-    raw_request: RawRequest,
     pub method: HttpMethod,
     pub segments: Vec<String>,
     query: Query,
     pub params: Params,
-    body: Option<Vec<u8>>,
+    headers: HashMap<String, Vec<String>>,
+    content_type: Option<mime::Mime>,
+    uri: Url,
+    body: Option<Body>,
 }
 
 impl Request {
-    pub fn new(raw_request: RawRequest) -> Self {
-        let segments: Vec<String> = raw_request
-            .url
-            .path()
-            .split('/')
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect();
-        let query = Query::new(&raw_request);
-        let params = Params::default();
-
-        Self {
-            method: raw_request.method.clone(),
-            raw_request,
-            segments,
-            query,
-            params,
-            body: None,
-        }
-    }
-
     pub fn path(&self) -> &str {
-        self.raw_request.url.path()
+        self.uri.path()
     }
 
     pub fn query(&self) -> &Query {
@@ -50,27 +31,62 @@ impl Request {
         &self.params
     }
 
-    pub fn body(&self) -> Option<&[u8]> {
-        self.body.as_deref()
-    }
-
     pub fn header(&self, key: &str) -> Option<&Vec<String>> {
-        self.raw_request.headers.get(&key.to_lowercase())
+        self.headers.get(&key.to_lowercase())
     }
 
     pub fn headers(&self) -> &HashMap<String, Vec<String>> {
-        &self.raw_request.headers
+        &self.headers
     }
 
     pub fn has_header(&self, key: &str) -> bool {
-        self.raw_request.headers.contains_key(&key.to_lowercase())
+        self.headers.contains_key(&key.to_lowercase())
     }
 
     pub fn header_contains(&self, key: &str, value: &str) -> bool {
-        if let Some(values) = self.raw_request.headers.get(&key.to_lowercase()) {
+        if let Some(values) = self.headers.get(&key.to_lowercase()) {
             return values.iter().any(|v| v == value);
         }
         false
+    }
+
+    pub fn content_type(&self) -> Option<&mime::Mime> {
+        self.content_type.as_ref()
+    }
+
+    pub fn from_raw(raw_request: RawRequest) -> Self {
+        let segments: Vec<String> = raw_request
+            .url
+            .path()
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        let query = Query::new(&raw_request);
+        let params = Params::default();
+        let content_type = raw_request
+            .header_metadata
+            .body_metadata
+            .map(|metadata| metadata.content_type);
+
+        Self {
+            method: raw_request.method,
+            segments,
+            query,
+            params,
+            headers: raw_request.headers,
+            content_type,
+            uri: raw_request.url,
+            body: raw_request.body,
+        }
+    }
+
+    pub fn parse_body<T: DeserializeOwned>(self) -> Result<T, Box<dyn std::error::Error>> {
+        let data = self.body.ok_or("No body")?.into_body_data()?;
+        match data {
+            BodyData::Json(json) => Ok(serde_json::from_value(json)?),
+            _ => Err("Unsupported body type".into()),
+        }
     }
 }
 
@@ -98,13 +114,10 @@ impl Query {
     }
 }
 
+#[derive(Default)]
 pub struct Params(HashMap<String, String>);
 
 impl Params {
-    pub fn default() -> Self {
-        Self(HashMap::new())
-    }
-
     pub fn new(route_segments: &[String], req_segments: &[String]) -> Self {
         let mut params_map = HashMap::new();
         for (route_seg, req_seg) in route_segments.iter().zip(req_segments) {
@@ -170,7 +183,7 @@ mod tests {
     #[test]
     fn test_request_segments_parsing() {
         let raw = mock_raw_request("http://localhost//users///123/?q=ignore");
-        let req = Request::new(raw);
+        let req = Request::from_raw(raw);
 
         assert_eq!(req.segments, vec!["users", "123"]);
     }

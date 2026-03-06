@@ -9,10 +9,11 @@ use std::io::{BufRead, Read};
 use std::io::{Seek, SeekFrom, Write};
 use std::str::FromStr;
 use std::sync::LazyLock;
-use tempfile::{SpooledTempFile, spooled_tempfile};
+use tempfile::spooled_tempfile;
 use url::Host;
 use url::Url;
 use zstd::stream::Decoder as ZstdDecoder;
+use crate::common::{BodyData, FormDataValue};
 
 use crate::common::HttpMethod;
 
@@ -296,7 +297,7 @@ pub struct Body {
     pub reader: Box<dyn Read>,
     pub size_hint: Option<u64>,
     pub encoding: Option<Vec<ContentEncoding>>,
-    pub content_type: Mime,
+    pub content_type: Option<Mime>,
     pub boundary: Option<String>,
 }
 
@@ -309,7 +310,7 @@ impl Body {
                 ContentLength::Fixed(length) => Some(length),
                 ContentLength::Chunked => None,
             },
-            content_type: metadata.content_type,
+            content_type: Some(metadata.content_type),
             boundary: metadata.boundary,
         }
     }
@@ -351,8 +352,8 @@ impl Body {
         let boundary = self.boundary.clone();
         let size_hint = self.size_hint;
         let mut reader = self.into_reader()?;
-        Ok(match content_type.essence_str() {
-            "application/x-www-form-urlencoded" => {
+        Ok(match content_type.as_ref().map(|m| m.essence_str()) {
+            Some("application/x-www-form-urlencoded") => {
                 let mut form_data: HashMap<String, FormDataValue> = HashMap::new();
 
                 let mut main_buf = String::new();
@@ -400,7 +401,7 @@ impl Body {
 
                 BodyData::FormData(form_data)
             }
-            "multipart/form-data" => {
+            Some("multipart/form-data") => {
                 let mut data: HashMap<String, FormDataValue> = HashMap::new();
 
                 let boundary = boundary.ok_or("Missing boundary for multipart")?;
@@ -460,7 +461,7 @@ impl Body {
 
                 BodyData::FormData(data)
             }
-            "text/plain" => {
+            Some("text/plain") => {
                 let mut text = match size_hint {
                     Some(size) => String::with_capacity(size as usize),
                     None => String::new(),
@@ -468,13 +469,21 @@ impl Body {
                 reader.read_to_string(&mut text)?;
                 BodyData::Text(text)
             }
-            _ => {
+            Some(_) | None => {
                 let mut data = match size_hint {
                     Some(size) => Vec::with_capacity(size as usize),
                     None => Vec::new(),
                 };
                 reader.read_to_end(&mut data)?;
-                BodyData::Other { content_type, data }
+
+                if data.is_empty() {
+                    BodyData::Empty
+                } else {
+                    BodyData::Other {
+                        content_type: Some(content_type.unwrap_or(mime::APPLICATION_OCTET_STREAM)),
+                        data,
+                    }
+                }
             }
         })
     }
@@ -558,22 +567,6 @@ impl Body {
 }
 
 type PartHeaders = (String, Option<String>, Option<String>);
-
-pub enum BodyData {
-    Json(serde_json::Value),
-    FormData(HashMap<String, FormDataValue>),
-    Text(String),
-    Other { content_type: Mime, data: Vec<u8> },
-}
-
-pub enum FormDataValue {
-    Text(String),
-    File {
-        filename: String,
-        content_type: String,
-        data: SpooledTempFile,
-    },
-}
 
 #[cfg(test)]
 mod test {
