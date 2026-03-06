@@ -1,9 +1,7 @@
 use flate2::Compression;
 use flate2::read::GzEncoder;
-use gimbap::common::{BodyData,HttpMethod, FormDataValue};
-use gimbap::request::parser::{
-    Body, ContentEncoding, HttpVersion, Request,
-};
+use gimbap::common::{BodyData, FormDataValue, HttpMethod};
+use gimbap::request::parser::{Body, ContentEncoding, HttpVersion, Request};
 use std::collections::HashMap;
 use std::io::{self, Read};
 

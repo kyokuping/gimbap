@@ -1,6 +1,9 @@
 use mime::Mime;
-use std::collections::{HashMap, hash_map::Entry};
-use std::{convert::Infallible, str::FromStr};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    convert::Infallible,
+    str::FromStr,
+};
 use tempfile::SpooledTempFile;
 
 #[derive(Debug)]
