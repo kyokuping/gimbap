@@ -1,4 +1,4 @@
-use crate::common::{BodyData, FormDataValue, Headers};
+use crate::common::{BodyData, FormDataValue, Headers, HttpMethod};
 use brotli::Decompressor as BrotliDecompressor;
 use derive_builder::Builder;
 use encoding_rs::UTF_8;
@@ -6,17 +6,12 @@ use flate2::read::{DeflateDecoder, GzDecoder};
 use mime::Mime;
 use once_cell::unsync::Lazy;
 use std::collections::HashMap;
-use std::io::{BufRead, Read};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{BufRead, Read, Seek, SeekFrom, Write};
 use std::str::FromStr;
 use std::sync::LazyLock;
 use tempfile::spooled_tempfile;
-use url::Host;
-use url::Url;
+use url::{Host, Url};
 use zstd::stream::Decoder as ZstdDecoder;
-use crate::common::{BodyData, FormDataValue};
-
-use crate::common::HttpMethod;
 
 const MAX_BODY_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 const BROTLI_BUFFER_SIZE: usize = 4096;
@@ -291,6 +286,7 @@ impl FromStr for ContentEncoding {
 
 type ParsedHeader = (Headers, HeaderMetadata);
 
+// parsed Body from raw request
 pub struct Body {
     pub reader: Box<dyn Read>,
     pub size_hint: Option<u64>,
