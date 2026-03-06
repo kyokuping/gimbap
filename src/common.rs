@@ -1,5 +1,5 @@
 use mime::Mime;
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::{convert::Infallible, str::FromStr};
 use tempfile::SpooledTempFile;
 
@@ -23,6 +23,46 @@ pub enum FormDataValue {
         content_type: String,
         data: SpooledTempFile,
     },
+}
+
+type HeaderName = String;
+type HeaderValue = Vec<String>;
+
+#[derive(Debug, PartialEq)]
+pub struct Headers(HashMap<HeaderName, HeaderValue>);
+
+impl Default for Headers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Headers {
+    pub fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    pub fn get(&self, key: &str) -> Option<&HeaderValue> {
+        self.0.get(&key.to_lowercase())
+    }
+
+    pub fn append(&mut self, key: String, values: &[String]) {
+        self.entry(key)
+            .or_default()
+            .extend(values.iter().map(|s| s.to_string()));
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.0.contains_key(&key.to_lowercase())
+    }
+
+    pub fn insert(&mut self, key: String, value: Vec<String>) {
+        self.0.insert(key.to_lowercase(), value);
+    }
+
+    pub fn entry(&mut self, key: String) -> Entry<'_, HeaderName, HeaderValue> {
+        self.0.entry(key.to_lowercase())
+    }
 }
 
 pub struct StatusCode(u16);

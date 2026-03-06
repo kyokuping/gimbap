@@ -1,10 +1,9 @@
-use crate::common::StatusCode;
+use crate::common::{Headers, StatusCode};
 use serde::Serialize;
-use std::collections::HashMap;
 
 pub struct Response {
     status_code: StatusCode,
-    headers: HashMap<String, Vec<String>>,
+    headers: Headers,
     body: Option<Vec<u8>>,
 }
 
@@ -18,7 +17,7 @@ impl Response {
     pub fn new() -> Self {
         Response {
             status_code: StatusCode::from_u16(200).unwrap(),
-            headers: HashMap::new(),
+            headers: Headers::new(),
             body: None,
         }
     }
@@ -76,7 +75,7 @@ mod tests {
         let response = Response::default();
         assert_eq!(response.status_code(), 200);
         assert!(response.body.is_none());
-        assert!(response.headers.is_empty());
+        assert_eq!(response.headers, Headers::new());
     }
 
     #[test]

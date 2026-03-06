@@ -1,3 +1,4 @@
+use crate::common::{BodyData, FormDataValue, Headers};
 use brotli::Decompressor as BrotliDecompressor;
 use derive_builder::Builder;
 use encoding_rs::UTF_8;
@@ -48,7 +49,7 @@ pub struct Request {
     pub method: HttpMethod,
     pub url: Url,
     pub version: HttpVersion,
-    pub headers: HashMap<String, Vec<String>>,
+    pub headers: Headers,
     pub header_metadata: HeaderMetadata,
     pub body: Option<Body>,
 }
@@ -109,7 +110,7 @@ impl Request {
         reader: &mut T,
         is_secure: bool,
     ) -> Result<ParsedHeader, Box<dyn std::error::Error>> {
-        let mut headers = HashMap::new();
+        let mut headers = Headers::new();
         let mut header_metadata_builder = HeaderMetadataBuilder::create_empty();
         let mut body_metadata_builder = Lazy::new(BodyMetadataBuilder::create_empty);
 
@@ -209,10 +210,7 @@ impl Request {
                     _ => {}
                 }
 
-                headers
-                    .entry(key)
-                    .or_insert_with(Vec::new)
-                    .extend_from_slice(&values);
+                headers.append(key, &values);
             }
         }
 
@@ -291,7 +289,7 @@ impl FromStr for ContentEncoding {
     }
 }
 
-type ParsedHeader = (HashMap<String, Vec<String>>, HeaderMetadata);
+type ParsedHeader = (Headers, HeaderMetadata);
 
 pub struct Body {
     pub reader: Box<dyn Read>,
