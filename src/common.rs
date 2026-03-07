@@ -72,6 +72,12 @@ pub struct StatusCode(u16);
 #[derive(Debug)]
 pub struct InvalidStatusCode;
 
+impl Default for StatusCode {
+    fn default() -> Self {
+        StatusCode(200)
+    }
+}
+
 impl StatusCode {
     pub fn from_u16(code: u16) -> Result<StatusCode, InvalidStatusCode> {
         if (100..=999).contains(&code) {
