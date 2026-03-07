@@ -1,4 +1,4 @@
-use crate::common::{Headers, StatusCode};
+use crate::common::{Headers, InvalidStatusCode, StatusCode};
 use serde::Serialize;
 
 pub struct Response {
@@ -29,34 +29,22 @@ impl Response {
         self.status_code.as_u16()
     }
 
-    pub fn status(&mut self, code: u16) -> &mut Self {
-        match StatusCode::from_u16(code) {
-            Ok(status) => {
-                self.status_code = status;
-            }
-            Err(_) => {
-                self.status_code = StatusCode::from_u16(500).unwrap();
-                self.send(b"Internal Server Error");
-            }
-        }
-        self
+    pub fn status(&mut self, code: u16) -> Result<&mut Self, InvalidStatusCode> {
+        let status = StatusCode::from_u16(code)?;
+        self.status_code = status;
+        Ok(self)
     }
     pub fn send(&mut self, body: &[u8]) -> &mut Self {
         self.body = Some(body.to_vec());
         self
     }
-    pub fn json<T: Serialize>(&mut self, data: &T) -> &mut Self {
-        match serde_json::to_vec(data) {
-            Ok(bytes) => {
-                self.header("content-type", "application/json");
-                self.send(&bytes)
-            }
-            Err(_) => {
-                self.status(500);
-                self.send(b"Internal Server Error")
-            }
-        }
+    pub fn json<T: Serialize>(&mut self, data: &T) -> Result<&mut Self, serde_json::Error> {
+        let bytes = serde_json::to_vec(data)?;
+        self.header("content-type", "application/json");
+        self.send(&bytes);
+        Ok(self)
     }
+
     pub fn header(&mut self, key: &str, value: &str) -> &mut Self {
         self.headers
             .entry(key.to_string())
@@ -83,6 +71,7 @@ mod tests {
         let mut response = Response::new();
         response
             .status(404)
+            .unwrap()
             .header("X-Test", "True")
             .send(b"Not Found");
 
@@ -103,7 +92,8 @@ mod tests {
         };
 
         let mut response = Response::new();
-        response.json(&data);
+        let result = response.json(&data);
+        assert!(result.is_ok());
 
         assert_eq!(
             response.headers.get("content-type").unwrap()[0],
