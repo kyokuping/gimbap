@@ -1,4 +1,6 @@
-use crate::common::{Headers, InvalidStatusCode, StatusCode};
+use std::str::FromStr;
+
+use crate::common::{HeaderValue, Headers, InvalidStatusCode, StatusCode};
 use serde::Serialize;
 
 pub struct Response {
@@ -17,7 +19,7 @@ impl Response {
     pub fn new() -> Self {
         Response {
             status_code: StatusCode::from_u16(200).unwrap(),
-            headers: Headers::new(),
+            headers: Headers::default(),
             body: None,
         }
     }
@@ -45,11 +47,17 @@ impl Response {
         Ok(self)
     }
 
+    fn sanitize<T>(input: &str) -> T
+    where
+        T: FromStr + Default,
+    {
+        let replaced = input.replace(['\r', '\n'], "");
+        replaced.parse::<T>().unwrap_or_default()
+    }
+
     pub fn header(&mut self, key: &str, value: &str) -> &mut Self {
-        self.headers
-            .entry(key.to_string())
-            .or_default()
-            .push(value.to_string());
+        let values: HeaderValue = Self::sanitize(value);
+        self.headers.append(Self::sanitize(key), values);
         self
     }
 }
@@ -63,7 +71,7 @@ mod tests {
         let response = Response::default();
         assert_eq!(response.status_code(), 200);
         assert!(response.body.is_none());
-        assert_eq!(response.headers, Headers::new());
+        assert_eq!(response.headers, Headers::default());
     }
 
     #[test]
@@ -77,7 +85,7 @@ mod tests {
 
         assert_eq!(response.status_code(), 404);
         assert_eq!(response.body(), Some("Not Found".as_bytes()));
-        assert_eq!(response.headers.get("X-Test").unwrap()[0], "True");
+        assert_eq!(response.headers.get_str("X-Test").unwrap()[0], "True");
     }
 
     #[test]
@@ -96,7 +104,7 @@ mod tests {
         assert!(result.is_ok());
 
         assert_eq!(
-            response.headers.get("content-type").unwrap()[0],
+            response.headers.get_str("content-type").unwrap()[0],
             "application/json"
         );
 

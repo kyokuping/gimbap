@@ -1,4 +1,4 @@
-use crate::common::{BodyData, FormDataValue, Headers, HttpMethod};
+use crate::common::{BodyData, FormDataValue, HeaderName, HeaderValue, Headers, HttpMethod};
 use brotli::Decompressor as BrotliDecompressor;
 use derive_builder::Builder;
 use encoding_rs::UTF_8;
@@ -19,12 +19,6 @@ const SPOOLED_TEMPFILE_MAX_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
 static URL_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^([A-Z]+?) ([^ ]+?) (HTTP/[0-9.]+?)\s*$").unwrap());
-static HEADER_NAME_REGEX: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z0-9!#\$%&'*+-.^_`|~]+$").unwrap());
-static HEADER_VALUE_REGEX: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new("^[\\t\\u0020-\\u007E\\u0080-\\u00FF]*$").unwrap());
-static AUTHORIZATION_REGEX: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"^\w+ .+$").unwrap());
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum HttpVersion {
@@ -105,12 +99,13 @@ impl Request {
         reader: &mut T,
         is_secure: bool,
     ) -> Result<ParsedHeader, Box<dyn std::error::Error>> {
-        let mut headers = Headers::new();
+        let mut headers = Headers::default();
         let mut header_metadata_builder = HeaderMetadataBuilder::create_empty();
         let mut body_metadata_builder = Lazy::new(BodyMetadataBuilder::create_empty);
 
         header_metadata_builder.is_secure(is_secure);
 
+        // TODO: Refactor BufRead::lines() to read_until with a reusable Vec<u8> buffer to eliminate per-line String allocations.
         for line in reader.lines() {
             let line = line?;
             if line.is_empty() {
@@ -118,45 +113,36 @@ impl Request {
             }
 
             if let Some((key_str, values_str)) = line.split_once(":") {
-                let key = key_str.trim().to_lowercase();
-                if !HEADER_NAME_REGEX.is_match(&key) {
+                let Some(key) = HeaderName::parse(key_str) else {
                     continue;
-                }
+                };
+                let Some(values) = HeaderValue::parse(values_str) else {
+                    continue;
+                };
 
-                let values: Vec<String> = values_str
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect();
                 if values
                     .iter()
-                    .any(|value| !HEADER_VALUE_REGEX.is_match(value))
+                    .any(|value| !Headers::is_special_valid(&key, value))
                 {
                     continue;
                 }
 
-                if values
-                    .iter()
-                    .any(|value| !Self::is_special_header_valid(&key, value))
-                {
-                    continue;
-                }
-
-                match key.as_str() {
-                    "host" => match &*values {
+                match &*key {
+                    "host" => match &values[..] {
                         [host] => {
                             header_metadata_builder.host(Host::parse(host)?);
                         }
                         [] => (),
                         _ => return Err("unexpected host header value".into()),
                     },
-                    "content-type" => match &*values {
+                    "content-type" => match &values[..] {
                         [content_type] => {
                             body_metadata_builder.content_type(Mime::from_str(content_type)?);
                         }
                         [] => (),
                         _ => return Err("unexpected content-type header value".into()),
                     },
-                    "content-length" => match &*values {
+                    "content-length" => match &values[..] {
                         [length] => {
                             body_metadata_builder
                                 .content_length(ContentLength::Fixed(length.parse()?));
@@ -164,7 +150,7 @@ impl Request {
                         [] => (),
                         _ => return Err("unexpected content-length header value".into()),
                     },
-                    "transfer-encoding" => match &*values {
+                    "transfer-encoding" => match &values[..] {
                         [encoding] => {
                             if encoding == "chunked" {
                                 body_metadata_builder.content_length(ContentLength::Chunked);
@@ -188,14 +174,14 @@ impl Request {
                             ));
                         }
                     }
-                    "boundary" => match &*values {
+                    "boundary" => match &values[..] {
                         [boundary] => {
                             body_metadata_builder.boundary(Some(boundary.to_string()));
                         }
                         [] => (),
                         _ => return Err("unexpected boundary header value".into()),
                     },
-                    "x-forwarded-proto" => match &*values {
+                    "x-forwarded-proto" => match &values[..] {
                         [proto] if proto == "https" => {
                             header_metadata_builder.is_secure(true);
                         }
@@ -205,7 +191,7 @@ impl Request {
                     _ => {}
                 }
 
-                headers.append(key, &values);
+                headers.append(key, values);
             }
         }
 
@@ -215,19 +201,6 @@ impl Request {
                 .transpose()?,
         );
         Ok((headers, header_metadata_builder.build()?))
-    }
-
-    fn is_special_header_valid(key: &str, value: &str) -> bool {
-        match key {
-            "authorization" => AUTHORIZATION_REGEX.is_match(value),
-            "accept" => {
-                !value.is_empty()
-                    && value
-                        .split(",")
-                        .all(|part| Mime::from_str(part.trim()).is_ok())
-            }
-            _ => true,
-        }
     }
 }
 
@@ -690,53 +663,58 @@ mod test {
             Request::parse_headers(&mut raw_headers.as_bytes(), false).unwrap();
 
         assert_eq!(
-            headers.get("host").unwrap(),
-            &vec!["example.com".to_string()]
+            headers.get_str("host").unwrap(),
+            &HeaderValue::try_from(vec!["example.com".to_string()]).unwrap()
         );
         assert_eq!(
-            headers.get("user-agent").unwrap(),
-            &vec!["gimbap-test/1.0".to_string()]
+            headers.get_str("user-agent").unwrap(),
+            &HeaderValue::try_from(vec!["gimbap-test/1.0".to_string()]).unwrap()
         );
         assert_eq!(
-            headers.get("accept").unwrap(),
-            &vec![
+            headers.get_str("accept").unwrap(),
+            &TryInto::<HeaderValue>::try_into(vec![
                 "text/html".to_string(),
                 "application/xhtml+xml".to_string(),
                 "application/xml;q=0.9".to_string(),
                 "*/*;q=0.8".to_string()
-            ]
+            ])
+            .unwrap()
         );
         assert_eq!(
-            headers.get("content-type").unwrap(),
-            &vec!["application/json".to_string()]
+            headers.get_str("content-type").unwrap(),
+            &HeaderValue::try_from(vec!["application/json".to_string()]).unwrap()
         );
         assert_eq!(
-            headers.get("content-length").unwrap(),
-            &vec!["42".to_string()]
+            headers.get_str("content-length").unwrap(),
+            &HeaderValue::try_from(vec!["42".to_string()]).unwrap()
         );
         assert_eq!(
-            headers.get("content-encoding").unwrap(),
+            headers.get_str("content-encoding").unwrap(),
             &vec!["gzip".to_string(), "deflate".to_string()]
+                .try_into()
+                .unwrap()
         );
 
         assert_eq!(
-            headers.get("authorization").unwrap(),
-            &vec!["Basic dXNlcjpwYXNz".to_string()]
+            headers.get_str("authorization").unwrap(),
+            &HeaderValue::try_from(vec!["Basic dXNlcjpwYXNz".to_string()]).unwrap()
         );
         assert_eq!(
-            headers.get("another-header").unwrap(),
+            headers.get_str("another-header").unwrap(),
             &vec![
                 "with".to_string(),
                 "multiple".to_string(),
                 "values".to_string()
             ]
+            .try_into()
+            .unwrap()
         );
         assert_eq!(
-            headers.get("whitespace-header").unwrap(),
-            &vec!["value with spaces".to_string()]
+            headers.get_str("whitespace-header").unwrap(),
+            &HeaderValue::try_from(vec!["value with spaces".to_string()]).unwrap()
         );
 
-        assert!(!headers.contains_key("Invalid@Header"));
+        assert!(!headers.contains_key(&HeaderName::new("Invalid@Header")));
 
         assert_eq!(header_metadata.host, Host::parse("example.com").unwrap());
 
