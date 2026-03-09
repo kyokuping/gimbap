@@ -1,4 +1,4 @@
-use crate::common::{BodyData, Headers, HttpMethod};
+use crate::common::{BodyData, HeaderName, HeaderValue, Headers, HttpMethod};
 use parser::{Body, Request as RawRequest};
 use percent_encoding::percent_decode_str;
 use serde::de::DeserializeOwned;
@@ -31,20 +31,20 @@ impl Request {
         &self.params
     }
 
-    pub fn header(&self, key: &str) -> Option<&Vec<String>> {
-        self.headers.get(&key.to_lowercase())
+    pub fn header(&self, key_str: &str) -> Option<&HeaderValue> {
+        self.headers.get_str(key_str)
     }
 
     pub fn headers(&self) -> &Headers {
         &self.headers
     }
 
-    pub fn has_header(&self, key: &str) -> bool {
-        self.headers.contains_key(&key.to_lowercase())
+    pub fn has_header(&self, key_str: &str) -> bool {
+        self.headers.contains_key(&HeaderName::new(key_str))
     }
 
-    pub fn header_contains(&self, key: &str, value: &str) -> bool {
-        if let Some(values) = self.headers.get(&key.to_lowercase()) {
+    pub fn header_contains(&self, key_str: &str, value: &str) -> bool {
+        if let Some(values) = self.headers.get(&HeaderName::new(key_str)) {
             return values.iter().any(|v| v == value);
         }
         false
