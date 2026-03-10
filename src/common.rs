@@ -60,7 +60,7 @@ impl HeaderName {
     }
 
     pub fn parse(key_str: &str) -> Option<Self> {
-        let key = key_str.trim().to_lowercase();
+        let key = key_str.to_lowercase();
         HEADER_NAME_REGEX.is_match(&key).then_some(Self(key))
     }
 }
