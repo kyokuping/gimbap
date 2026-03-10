@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use crate::common::{HeaderValue, Headers, InvalidStatusCode, StatusCode};
+use crate::common::{HeaderName, HeaderValue, Headers, InvalidStatusCode, StatusCode};
 use serde::Serialize;
 
 pub struct Response {
@@ -47,17 +47,21 @@ impl Response {
         Ok(self)
     }
 
-    fn sanitize<T>(input: &str) -> T
+    fn sanitize<T>(input: &str) -> Result<T, T::Err>
     where
         T: FromStr + Default,
     {
         let replaced = input.replace(['\r', '\n'], "");
-        replaced.parse::<T>().unwrap_or_default()
+        <T as FromStr>::from_str(&replaced)
     }
 
     pub fn header(&mut self, key: &str, value: &str) -> &mut Self {
-        let values: HeaderValue = Self::sanitize(value);
-        self.headers.append(Self::sanitize(key), values);
+        if let (Ok(key), Ok(values)) = (
+            Self::sanitize::<HeaderName>(key),
+            Self::sanitize::<HeaderValue>(value),
+        ) {
+            self.headers.append(key, values);
+        }
         self
     }
 }
