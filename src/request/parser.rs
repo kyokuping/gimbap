@@ -447,7 +447,7 @@ impl Body {
                     BodyData::Empty
                 } else {
                     BodyData::Other {
-                        content_type: Some(content_type.unwrap_or(mime::APPLICATION_OCTET_STREAM)),
+                        content_type: content_type.or(Some(mime::APPLICATION_OCTET_STREAM)),
                         data,
                     }
                 }
